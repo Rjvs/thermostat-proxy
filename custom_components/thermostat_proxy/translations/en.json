@@ -1,0 +1,78 @@
+{
+  "title": "Thermostat Proxy",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Thermostat Proxy",
+        "description": "Wrap a thermostat and expose a virtual one with selectable sensors.",
+        "data": {
+          "name": "Name",
+          "thermostat": "Physical thermostat"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Thermostat Proxy",
+        "description": "Update the name or physical thermostat, then manage sensors.",
+        "data": {
+          "name": "Name",
+          "thermostat": "Physical thermostat"
+        }
+      },
+      "sensors": {
+        "title": "Temperature sensors",
+        "description": "Add at least one sensor. Each one becomes a preset mode.",
+        "data": {
+          "name": "Sensor name",
+          "entity_id": "Temperature entity",
+          "add_another": "Add another sensor"
+        }
+      },
+      "manage_sensors": {
+        "title": "Manage sensors",
+        "description": "Current sensors: {sensor_list}",
+        "data": {
+          "action": "Choose what to do"
+        }
+      },
+      "remove_sensor": {
+        "title": "Remove a sensor",
+        "description": "Select a sensor to remove from this thermostat.",
+        "data": {
+          "name": "Sensor name"
+        }
+      },
+      "finalize": {
+        "title": "Defaults",
+        "description": "Optionally select which sensor is active on startup.",
+        "data": {
+          "default_sensor": "Default sensor"
+        }
+      }
+    },
+    "error": {
+      "duplicate_sensor_name": "Sensor names must be unique.",
+      "duplicate_sensor_entity": "Each entity can only be used once.",
+      "reserved_sensor_name": "That name is reserved for the physical thermostat sensor.",
+      "no_sensors": "Add at least one sensor before finishing.",
+      "invalid_default_sensor": "Select a sensor from the list.",
+      "already_configured": "This unique ID is already in use."
+    },
+    "abort": {
+      "reconfigure_successful": "Configuration updated.",
+      "unknown": "Reconfigure target was not found."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Thermostat Proxy options",
+        "data": {
+          "default_sensor": "Default sensor"
+        }
+      }
+    },
+    "error": {
+      "invalid_default_sensor": "Select a sensor from the list."
+    }
+  }
+}
