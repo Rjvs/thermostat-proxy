@@ -67,7 +67,7 @@ climate:
 Switch the active sensor (preset):
 
 ```yaml
-service: climate.set_preset_mode
+action: climate.set_preset_mode
 target:
   entity_id: climate.living_room_proxy
 data:
@@ -77,7 +77,7 @@ data:
 Set a sensor-based target temperature:
 
 ```yaml
-service: climate.set_temperature
+action: climate.set_temperature
 target:
   entity_id: climate.living_room_proxy
 data:
