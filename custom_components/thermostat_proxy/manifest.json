@@ -2,11 +2,11 @@
   "domain": "thermostat_proxy",
   "name": "Thermostat Proxy",
   "version": "0.1.0",
-  "documentation": "https://github.com/yourname/thermostat_proxy",
+  "documentation": "https://github.com/jianyu-li/thermostat-proxy",
   "icon": "icon.png",
   "logo": "logo.png",
   "config_flow": true,
   "requirements": [],
-  "codeowners": ["@yourname"],
+  "codeowners": ["@jianyu-li"],
   "iot_class": "assumed_state"
 }
