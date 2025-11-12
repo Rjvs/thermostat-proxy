@@ -20,35 +20,9 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 2. Restart Home Assistant.
 3. In Home Assistant, go to **Settings → Devices & Services → Add Integration → Thermostat Proxy** and walk through the wizard: pick the physical thermostat, add and name your temperature sensors (each name becomes a preset), and optionally choose which sensor (including the automatically provided “Physical Entity” option) should be active by default. You can revisit the integration’s **Configure** button later to change the default sensor without re-creating the entry.
 
-## YAML Configuration
+## Configuration Notes
 
-If you prefer YAML, the platform is still available. Add it to the `climate` section of `configuration.yaml` (or a package). To use the built-in preset as your default, set `default_sensor: Physical Entity`:
-
-```yaml
-climate:
-  - platform: thermostat_proxy
-    name: Living Room Proxy
-    thermostat: climate.living_room_physical
-    default_sensor: Kitchen
-    sensors:
-      - name: Kitchen
-        entity_id: sensor.kitchen_temperature
-      - name: Bedroom
-        entity_id: sensor.bedroom_temperature
-      - name: Office
-        entity_id: sensor.office_temperature
-```
-
-### Options
-
-| Option | Required | Description |
-| --- | --- | --- |
-| `thermostat` | ✅ | The entity ID of the real thermostat to mirror. |
-| `sensors` | ✅ | List of sensor objects with `name` (used as preset) and `entity_id`. |
-| `name` | | Friendly name for the new climate entity (`Thermostat Proxy` by default). |
-| `default_sensor` | | Name of the sensor to select on startup (defaults to the first item). |
-
-> UI-based setups automatically derive a `unique_id` from the name you choose. If you configure the integration via YAML you can still include `unique_id` manually, but it is optional.
+The integration is config-entry only. Use **Settings → Devices & Services → Add Integration** to create an entry. You can revisit the entry’s **Configure** button at any time to change the default sensor or rename existing presets.
 
 ## How It Works
 
