@@ -6,6 +6,7 @@
   "documentation": "https://github.com/jianyu-li/thermostat-proxy",
   "iot_class": "assumed_state",
   "issue_tracker": "https://github.com/jianyu-li/thermostat-proxy/issues",
+  "dependencies": ["logbook"],
   "requirements": [],
   "version": "0.1.0"
 }
