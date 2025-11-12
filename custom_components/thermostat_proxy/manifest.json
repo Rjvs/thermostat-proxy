@@ -3,6 +3,7 @@
   "name": "Thermostat Proxy",
   "version": "0.1.0",
   "documentation": "https://github.com/jianyu-li/thermostat-proxy",
+  "issue_tracker": "https://github.com/jianyu-li/thermostat-proxy/issues",
   "icon": "icon.png",
   "logo": "logo.png",
   "config_flow": true,

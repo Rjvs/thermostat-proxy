@@ -1,0 +1,5 @@
+{
+  "name": "Thermostat Proxy",
+  "domains": ["thermostat_proxy"],
+  "render_readme": true
+}
