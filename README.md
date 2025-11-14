@@ -1,14 +1,12 @@
 # Thermostat Proxy (Home Assistant)
 
-<img src="custom_components/thermostat_proxy/icon.png" alt="Thermostat Proxy icon" width="96" />
+![Thermostat Proxy icon](custom_components/thermostat_proxy/icon.png)
 
 A Home Assistant custom integration that lets you expose a virtual `climate` entity which mirrors a real thermostat but lets you pick any temperature sensor to act as the “current temperature”. When you change the virtual target temperature, the integration calculates the difference between the selected sensor and the requested set point, then offsets the real thermostat so it behaves as if it were reading the chosen sensor.
 
 ## Installation via HACS
 
 [![Add to Home Assistant](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?repository=thermostat-proxy&category=integration&owner=jianyu-li)
-
-> ⚠️ **Caution — Active Development:** This integration is moving quickly. Expect frequent updates and occasional breaking changes while configuration options and defaults are still being refined.
 
 ![Thermostat Proxy screenshot](images/main.png)
 ![Comparison diagram](images/comparison.png)
