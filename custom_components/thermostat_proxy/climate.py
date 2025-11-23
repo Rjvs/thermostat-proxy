@@ -64,6 +64,7 @@ from .const import (
     CONF_SENSORS,
     CONF_THERMOSTAT,
     CONF_UNIQUE_ID,
+    DEFAULT_SENSOR_LAST_ACTIVE,
     CONF_USE_LAST_ACTIVE_SENSOR,
     CONF_SYNC_PHYSICAL_CHANGES,
 )
@@ -119,6 +120,12 @@ async def async_setup_platform(
 ) -> None:
     """Set up a Thermostat Proxy entity from YAML."""
 
+    default_sensor = config.get(CONF_DEFAULT_SENSOR)
+    use_last_active_sensor = config.get(CONF_USE_LAST_ACTIVE_SENSOR, False)
+    if default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
+        use_last_active_sensor = True
+        default_sensor = None
+
     async_add_entities(
         [
             CustomThermostatEntity(
@@ -126,12 +133,12 @@ async def async_setup_platform(
                 name=config[CONF_NAME],
                 real_thermostat=config[CONF_THERMOSTAT],
                 sensors=config[CONF_SENSORS],
-                default_sensor=config.get(CONF_DEFAULT_SENSOR),
+                default_sensor=default_sensor,
                 unique_id=config.get(CONF_UNIQUE_ID),
                 physical_sensor_name=config.get(
                     CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
                 ),
-                use_last_active_sensor=config.get(CONF_USE_LAST_ACTIVE_SENSOR, False),
+                use_last_active_sensor=use_last_active_sensor,
                 sync_physical_changes=config.get(CONF_SYNC_PHYSICAL_CHANGES, False),
             )
         ]
@@ -154,11 +161,21 @@ async def async_setup_entry(
         )
         return
 
-    default_sensor = entry.options.get(CONF_DEFAULT_SENSOR) or data.get(CONF_DEFAULT_SENSOR)
+    raw_default_sensor = entry.options.get(CONF_DEFAULT_SENSOR) or data.get(CONF_DEFAULT_SENSOR)
     physical_sensor_name = data.get(CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME)
     valid_sensor_names = [sensor[CONF_SENSOR_NAME] for sensor in sensors]
     if physical_sensor_name not in valid_sensor_names:
         valid_sensor_names.append(physical_sensor_name)
+
+    use_last_active_sensor = entry.options.get(
+        CONF_USE_LAST_ACTIVE_SENSOR,
+        data.get(CONF_USE_LAST_ACTIVE_SENSOR, False),
+    )
+    if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
+        use_last_active_sensor = True
+        default_sensor = None
+    else:
+        default_sensor = raw_default_sensor
 
     if default_sensor and default_sensor not in valid_sensor_names:
         _LOGGER.warning(
@@ -167,11 +184,6 @@ async def async_setup_entry(
             entry.entry_id,
         )
         default_sensor = None
-
-    use_last_active_sensor = entry.options.get(
-        CONF_USE_LAST_ACTIVE_SENSOR,
-        data.get(CONF_USE_LAST_ACTIVE_SENSOR, False),
-    )
 
     async_add_entities(
         [
