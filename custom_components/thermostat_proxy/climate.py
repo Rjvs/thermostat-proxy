@@ -71,6 +71,7 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PRECISION = 0.1
+MAX_TRACKED_REAL_TARGET_REQUESTS = 5
 
 # Attributes supplied by ClimateEntity itself that must NOT be overridden by
 # forwarding the physical thermostat's attributes, otherwise the front-end sees
@@ -254,6 +255,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._temperature_unit: str | None = None
         self._real_state: State | None = None
         self._last_requested_real_target: float | None = None
+        self._recent_real_target_requests: list[float] = []
         self._last_real_target_temp: float | None = None
         self._unsub_listeners: list[Callable[[], None]] = []
         self._min_temp: float | None = None
@@ -337,18 +339,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if real_target is not None:
             previous_real_target = self._last_real_target_temp
             self._last_real_target_temp = real_target
-            tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
-            if (
-                self._last_requested_real_target is not None
-                and math.isclose(
-                    real_target,
-                    self._last_requested_real_target,
-                    abs_tol=tolerance,
-                )
-            ):
-                self._last_requested_real_target = None
+            pending_tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+            if self._consume_real_target_request(real_target, pending_tolerance):
+                pass
             elif previous_real_target is not None and not math.isclose(
-                real_target, previous_real_target, abs_tol=tolerance
+                real_target, previous_real_target, abs_tol=DEFAULT_PRECISION
             ):
                 self._handle_external_real_target_change(real_target)
         self._schedule_target_realign()
@@ -398,6 +393,52 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         self.hass.async_create_task(
             self._async_log_physical_override(real_target, switched)
+        )
+
+    def _record_real_target_request(self, real_target: float) -> None:
+        """Track target values we have explicitly requested from the thermostat."""
+
+        self._last_requested_real_target = real_target
+        self._recent_real_target_requests.append(real_target)
+        if len(self._recent_real_target_requests) > MAX_TRACKED_REAL_TARGET_REQUESTS:
+            self._recent_real_target_requests.pop(0)
+
+    def _remove_real_target_request(self, real_target: float) -> None:
+        """Remove a pending request after failures so we don't ignore real updates."""
+
+        tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+        for index, pending in enumerate(self._recent_real_target_requests):
+            if math.isclose(real_target, pending, abs_tol=tolerance):
+                del self._recent_real_target_requests[index]
+                break
+        if self._recent_real_target_requests:
+            self._last_requested_real_target = self._recent_real_target_requests[-1]
+        else:
+            self._last_requested_real_target = None
+
+    def _consume_real_target_request(self, real_target: float, tolerance: float) -> bool:
+        """Return True if a state update matches one of our pending requests."""
+
+        for index, pending in enumerate(self._recent_real_target_requests):
+            if math.isclose(real_target, pending, abs_tol=tolerance):
+                del self._recent_real_target_requests[index]
+                if self._recent_real_target_requests:
+                    self._last_requested_real_target = (
+                        self._recent_real_target_requests[-1]
+                    )
+                else:
+                    self._last_requested_real_target = None
+                return True
+        return False
+
+    def _has_pending_real_target_request(
+        self, real_target: float, tolerance: float
+    ) -> bool:
+        """Return True if we've already asked the thermostat for this target."""
+
+        return any(
+            math.isclose(real_target, pending, abs_tol=tolerance)
+            for pending in self._recent_real_target_requests
         )
 
     def _discover_temperature_unit(self) -> str:
@@ -624,15 +665,19 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 sensor_temp=display_current,
                 real_current=real_current,
             )
-            await self.hass.services.async_call(
-                CLIMATE_DOMAIN,
-                SERVICE_SET_TEMPERATURE,
-                payload,
-                blocking=True,
-            )
+            self._record_real_target_request(real_target)
+            try:
+                await self.hass.services.async_call(
+                    CLIMATE_DOMAIN,
+                    SERVICE_SET_TEMPERATURE,
+                    payload,
+                    blocking=True,
+                )
+            except Exception:
+                self._remove_real_target_request(real_target)
+                raise
 
             self._virtual_target_temperature = constrained_target
-            self._last_requested_real_target = real_target
             self._start_auto_sync_log_suppression()
             self.async_write_ha_state()
 
@@ -819,9 +864,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 current_real_target, desired_real_target, abs_tol=tolerance
             ):
                 return
-            if self._last_requested_real_target is not None and math.isclose(
-                self._last_requested_real_target, desired_real_target, abs_tol=tolerance
-            ):
+            if self._has_pending_real_target_request(desired_real_target, tolerance):
                 return
 
             await self._async_log_real_adjustment(
@@ -831,16 +874,20 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 sensor_temp=sensor_temp,
                 real_current=real_current,
             )
-            await self.hass.services.async_call(
-                CLIMATE_DOMAIN,
-                SERVICE_SET_TEMPERATURE,
-                {
-                    ATTR_ENTITY_ID: self._real_entity_id,
-                    ATTR_TEMPERATURE: desired_real_target,
-                },
-                blocking=True,
-            )
-            self._last_requested_real_target = desired_real_target
+            self._record_real_target_request(desired_real_target)
+            try:
+                await self.hass.services.async_call(
+                    CLIMATE_DOMAIN,
+                    SERVICE_SET_TEMPERATURE,
+                    {
+                        ATTR_ENTITY_ID: self._real_entity_id,
+                        ATTR_TEMPERATURE: desired_real_target,
+                    },
+                    blocking=True,
+                )
+            except Exception:
+                self._remove_real_target_request(desired_real_target)
+                raise
             self._last_real_target_temp = desired_real_target
             self._start_auto_sync_log_suppression()
 
