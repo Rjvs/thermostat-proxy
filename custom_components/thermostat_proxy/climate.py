@@ -988,10 +988,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         # Check for fan mode support
         supported = self._real_state.attributes.get("supported_features", 0)
-        # We need to manually combine flags because ClimateEntityFeature is a flag enum in modern HA
-        # But we inherit everything we don't block.
-        # Wait, we define _attr_supported_features in __init__. We need to merge it.
-        # Let's update _attr_supported_features dynamically.
+        # Combine base features with dynamically detected fan support
         
         base_features = (
             ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
