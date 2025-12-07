@@ -935,7 +935,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 desired_real_target = self._apply_target_constraints(desired_real_target + overdrive_adjust)
 
             current_real_target = self._get_real_target_temperature()
-            target_tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+            # We must be strict here; if the step is 1.0, 66 vs 67 must be seen as different.
+            # Using self.precision (1.0) as tolerance caused isclose(66, 67, abs_tol=1.0) -> True.
+            target_tolerance = 0.1
             
             # If we are in overdrive, we might be pushing AWAY from the "correct" delta-based target
             # So we should generally update if there's a difference.
