@@ -15,11 +15,13 @@ import voluptuous as vol
 from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateEntity
 from homeassistant.components.climate.const import (
     ATTR_CURRENT_TEMPERATURE,
+    ATTR_HVAC_ACTION,
     ATTR_HVAC_MODE,
     ATTR_MAX_TEMP,
     ATTR_MIN_TEMP,
     ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
+    HVACAction,
     HVACMode,
     SERVICE_SET_HVAC_MODE,
     SERVICE_SET_TEMPERATURE,
@@ -39,6 +41,9 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     UnitOfTemperature,
 )
+from homeassistant.components.climate.const import (
+    ATTR_CURRENT_HUMIDITY,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers import config_validation as cv
@@ -52,10 +57,13 @@ from .const import (
     ATTR_ACTIVE_SENSOR_ENTITY_ID,
     ATTR_REAL_CURRENT_TEMPERATURE,
     ATTR_REAL_TARGET_TEMPERATURE,
+    ATTR_REAL_CURRENT_HUMIDITY,
     ATTR_SELECTED_SENSOR_OPTIONS,
     ATTR_UNAVAILABLE_ENTITIES,
     CONF_PHYSICAL_SENSOR_NAME,
     DEFAULT_NAME,
+    OVERDRIVE_ADJUSTMENT_COOL,
+    OVERDRIVE_ADJUSTMENT_HEAT,
     PHYSICAL_SENSOR_NAME,
     PHYSICAL_SENSOR_SENTINEL,
     CONF_DEFAULT_SENSOR,
@@ -91,6 +99,7 @@ _RESERVED_REAL_ATTRIBUTES = {
     "supported_features",
     "fan_mode",
     "fan_modes",
+    "current_humidity",
 }
 
 SENSOR_SCHEMA = vol.Schema(
@@ -482,6 +491,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._mark_entity_health(self._real_entity_id, True)
         return value
 
+    def _get_real_current_humidity(self) -> float | None:
+        if not self._real_state:
+            return None
+        return self._real_state.attributes.get(ATTR_CURRENT_HUMIDITY)
+
     def _get_active_sensor_temperature(self) -> float | None:
         sensor = self._sensor_lookup.get(self._selected_sensor_name)
         if not sensor:
@@ -622,6 +636,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 ATTR_REAL_CURRENT_TEMPERATURE: self._get_real_current_temperature(),
                 ATTR_REAL_TARGET_TEMPERATURE: self._last_real_target_temp
                 or self._get_real_target_temperature(),
+                ATTR_REAL_CURRENT_HUMIDITY: self._get_real_current_humidity(),
                 ATTR_SELECTED_SENSOR_OPTIONS: {
                     item.name: (
                         self._real_entity_id if item.is_physical else item.entity_id
@@ -898,19 +913,60 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if desired_real_target is None:
                 return
 
+            # Overdrive Logic: Check if we are stalled
+            # Stalled = Target not met AND Real Thermostat is Idle
+            overdrive_active = False
+            overdrive_adjust = 0.0
+
+            if self._real_state and self.hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
+                 real_action = self._real_state.attributes.get(ATTR_HVAC_ACTION)
+                 tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+                 
+                 # Heat Mode Stall
+                 if self.hvac_mode == HVACMode.HEAT:
+                     # We want heat, but we aren't heating
+                     want_heat = self._virtual_target_temperature > (sensor_temp + tolerance)
+                     not_heating = real_action != HVACAction.HEATING
+                     if want_heat and not_heating:
+                         overdrive_active = True
+                         # Push target up to force start
+                         overdrive_adjust = OVERDRIVE_ADJUSTMENT_HEAT # Degree matching unit
+                         _LOGGER.info("Overdrive active: Heating required but thermostat idle. Applying +%s offset.", overdrive_adjust)
+
+                 # Cool Mode Stall
+                 elif self.hvac_mode == HVACMode.COOL:
+                     # We want cool, but we aren't cooling
+                     want_cool = self._virtual_target_temperature < (sensor_temp - tolerance)
+                     not_cooling = real_action != HVACAction.COOLING
+                     if want_cool and not_cooling:
+                         overdrive_active = True
+                         # Push target down to force start
+                         overdrive_adjust = OVERDRIVE_ADJUSTMENT_COOL
+                         _LOGGER.info("Overdrive active: Cooling required but thermostat idle. Applying %s offset.", overdrive_adjust)
+            
+            if overdrive_active:
+                desired_real_target = self._apply_target_constraints(desired_real_target + overdrive_adjust)
+
             current_real_target = self._get_real_target_temperature()
-            target_tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+            # We must be strict here; if the step is 1.0, 66 vs 67 must be seen as different.
+            # Using self.precision (1.0) as tolerance caused isclose(66, 67, abs_tol=1.0) -> True.
+            target_tolerance = 0.1
+            
+            # If we are in overdrive, we might be pushing AWAY from the "correct" delta-based target
+            # So we should generally update if there's a difference.
+            # But the standard check is:
             if current_real_target is not None and math.isclose(
                 current_real_target, desired_real_target, abs_tol=target_tolerance
             ):
                 return
+            
             pending_tolerance = self._pending_request_tolerance()
             if self._has_pending_real_target_request(desired_real_target, pending_tolerance):
                 return
 
             await self._async_log_real_adjustment(
                 desired_target=desired_real_target,
-                reason="sensor realignment",
+                reason="sensor realignment" + (" (overdrive)" if overdrive_active else ""),
                 virtual_target=self._virtual_target_temperature,
                 sensor_temp=sensor_temp,
                 real_current=real_current,
@@ -1122,7 +1178,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 segments.append(real_math)
         if not segments:
             segments.append("no context available")
-        
+
         suffix = f" (by {actor_name})" if actor_name else ""
 
         context_text = " | ".join(segments)

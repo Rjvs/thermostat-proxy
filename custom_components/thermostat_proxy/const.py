@@ -22,5 +22,10 @@ ATTR_ACTIVE_SENSOR = "active_sensor"
 ATTR_ACTIVE_SENSOR_ENTITY_ID = "active_sensor_entity_id"
 ATTR_REAL_CURRENT_TEMPERATURE = "real_current_temperature"
 ATTR_REAL_TARGET_TEMPERATURE = "real_target_temperature"
+ATTR_REAL_CURRENT_HUMIDITY = "real_current_humidity"
 ATTR_SELECTED_SENSOR_OPTIONS = "sensor_options"
 ATTR_UNAVAILABLE_ENTITIES = "unavailable_entities"
+
+OVERDRIVE_ADJUSTMENT_HEAT = 1.0
+OVERDRIVE_ADJUSTMENT_COOL = -1.0
+
