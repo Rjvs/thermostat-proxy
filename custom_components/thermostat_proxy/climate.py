@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import asyncio
 import logging
 import math
@@ -74,6 +75,8 @@ from .const import (
     CONF_UNIQUE_ID,
     DEFAULT_SENSOR_LAST_ACTIVE,
     CONF_USE_LAST_ACTIVE_SENSOR,
+    CONF_COOLDOWN_PERIOD,
+    DEFAULT_COOLDOWN_PERIOD,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -117,7 +120,11 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_UNIQUE_ID): cv.string,
         vol.Optional(CONF_DEFAULT_SENSOR): cv.string,
         vol.Optional(CONF_PHYSICAL_SENSOR_NAME): cv.string,
+        vol.Optional(CONF_PHYSICAL_SENSOR_NAME): cv.string,
         vol.Optional(CONF_USE_LAST_ACTIVE_SENSOR, default=False): cv.boolean,
+        vol.Optional(CONF_COOLDOWN_PERIOD, default=DEFAULT_COOLDOWN_PERIOD): vol.All(
+            cv.time_period, cv.positive_timedelta
+        ),
     }
 )
 
@@ -149,6 +156,7 @@ async def async_setup_platform(
                     CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
                 ),
                 use_last_active_sensor=use_last_active_sensor,
+                cooldown_period=config.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
             )
         ]
     )
@@ -180,6 +188,11 @@ async def async_setup_entry(
         CONF_USE_LAST_ACTIVE_SENSOR,
         data.get(CONF_USE_LAST_ACTIVE_SENSOR, False),
     )
+    cooldown_period = entry.options.get(
+        CONF_COOLDOWN_PERIOD,
+        data.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
+    )
+
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
         default_sensor = None
@@ -203,8 +216,10 @@ async def async_setup_entry(
                 sensors=sensors,
                 default_sensor=default_sensor,
                 unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
+                unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
                 physical_sensor_name=physical_sensor_name,
                 use_last_active_sensor=use_last_active_sensor,
+                cooldown_period=cooldown_period,
             )
         ]
     )
@@ -233,9 +248,16 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         default_sensor: str | None,
         unique_id: str | None,
         physical_sensor_name: str | None,
+        physical_sensor_name: str | None,
         use_last_active_sensor: bool,
+        cooldown_period: float | int | datetime.timedelta = 0,
     ) -> None:
         self.hass = hass
+        if isinstance(cooldown_period, (int, float)):
+            self._cooldown_period = float(cooldown_period)
+        else:
+            self._cooldown_period = cooldown_period.total_seconds()
+        self._last_real_write_time = 0.0
         self._attr_name = name
         self._attr_unique_id = unique_id
         self._real_entity_id = real_thermostat
@@ -713,6 +735,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 raise
 
             self._virtual_target_temperature = constrained_target
+            self._last_real_write_time = time.monotonic()
             self._start_auto_sync_log_suppression()
             self.async_write_ha_state()
 
@@ -901,6 +924,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         if self._virtual_target_temperature is None:
             return
+            
+        now = time.monotonic()
+        if self._cooldown_period > 0:
+            if now - self._last_real_write_time < self._cooldown_period:
+                return
 
         async with self._command_lock:
             sensor_temp = self._get_active_sensor_temperature()
@@ -987,6 +1015,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._remove_real_target_request(desired_real_target)
                 raise
             self._last_real_target_temp = desired_real_target
+            self._last_real_write_time = time.monotonic()
             self._start_auto_sync_log_suppression()
 
 

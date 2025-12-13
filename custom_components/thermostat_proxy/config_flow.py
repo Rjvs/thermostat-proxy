@@ -25,6 +25,8 @@ from .const import (
     DEFAULT_NAME,
     DOMAIN,
     PHYSICAL_SENSOR_NAME,
+    CONF_COOLDOWN_PERIOD,
+    DEFAULT_COOLDOWN_PERIOD,
 )
 
 SENSOR_STEP = "sensors"
@@ -53,6 +55,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._default_sensor: str | None = None
         self._physical_sensor_name: str = PHYSICAL_SENSOR_NAME
         self._use_last_active_sensor: bool = False
+        self._cooldown_period: int = DEFAULT_COOLDOWN_PERIOD
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
@@ -112,6 +115,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._default_sensor = entry.data.get(CONF_DEFAULT_SENSOR)
         self._physical_sensor_name = entry.data.get(
             CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
+        )
+        self._cooldown_period = entry.data.get(
+            CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
         )
         self._use_last_active_sensor = entry.data.get(
             CONF_USE_LAST_ACTIVE_SENSOR, False
@@ -295,6 +301,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 submitted_physical_name.strip() if submitted_physical_name else ""
             ) or PHYSICAL_SENSOR_NAME
 
+            cooldown_period = user_input.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD)
+
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
                 for sensor_name in sensor_names
@@ -315,6 +323,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     None if use_last_active_sensor else default_sensor
                 )
                 self._physical_sensor_name = physical_sensor_name
+                self._cooldown_period = cooldown_period
                 self._use_last_active_sensor = use_last_active_sensor
 
                 sensor_names_with_physical = list(sensor_names)
@@ -325,6 +334,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     **self._data,
                     CONF_SENSORS: self._sensors,
                     CONF_PHYSICAL_SENSOR_NAME: self._physical_sensor_name,
+                    CONF_COOLDOWN_PERIOD: self._cooldown_period,
                     CONF_USE_LAST_ACTIVE_SENSOR: self._use_last_active_sensor,
                 }
                 if self._use_last_active_sensor:
@@ -356,7 +366,14 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PHYSICAL_SENSOR_NAME, default=self._physical_sensor_name
             ): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
-            )
+            ),
+            vol.Optional(
+                CONF_COOLDOWN_PERIOD, default=self._cooldown_period
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=300, unit_of_measurement="seconds", mode=selector.NumberSelectorMode.BOX
+                )
+            ),
         }
 
         if sensor_names:
@@ -435,6 +452,10 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_USE_LAST_ACTIVE_SENSOR,
             self.config_entry.data.get(CONF_USE_LAST_ACTIVE_SENSOR, False),
         )
+        current_cooldown = self.config_entry.options.get(
+            CONF_COOLDOWN_PERIOD,
+            self.config_entry.data.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
+        )
 
         if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
             use_last_active_sensor = True
@@ -454,6 +475,8 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                     if default_sensor:
                         data[CONF_DEFAULT_SENSOR] = default_sensor
                     data[CONF_USE_LAST_ACTIVE_SENSOR] = False
+                
+                data[CONF_COOLDOWN_PERIOD] = user_input.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD)
                 return self.async_create_entry(title="", data=data)
 
         schema_fields: dict[Any, Any] = {}
@@ -479,6 +502,14 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_DEFAULT_SENSOR,
                 default=default_choice or sensor_names[0],
             )] = selector.SelectSelector(selector_config)
+
+        schema_fields[
+            vol.Optional(CONF_COOLDOWN_PERIOD, default=current_cooldown)
+        ] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0, max=300, unit_of_measurement="seconds", mode=selector.NumberSelectorMode.BOX
+            )
+        )
 
         data_schema = vol.Schema(schema_fields)
 

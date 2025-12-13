@@ -17,6 +17,9 @@ DEFAULT_SENSOR_LAST_ACTIVE = "__thermostat_proxy_last_active__"
 CONF_USE_LAST_ACTIVE_SENSOR = "use_last_active_sensor"
 CONF_UNIQUE_ID = "unique_id"
 CONF_PHYSICAL_SENSOR_NAME = "physical_sensor_name"
+CONF_COOLDOWN_PERIOD = "cooldown_period"
+
+DEFAULT_COOLDOWN_PERIOD = 0
 
 ATTR_ACTIVE_SENSOR = "active_sensor"
 ATTR_ACTIVE_SENSOR_ENTITY_ID = "active_sensor_entity_id"

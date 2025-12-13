@@ -46,7 +46,8 @@
         "description": "Optionally rename the physical thermostat preset and decide which sensor (including the last active one) should be active on startup.",
         "data": {
           "physical_sensor_name": "Physical thermostat preset name",
-          "default_sensor": "Default sensor"
+          "default_sensor": "Default sensor",
+          "cooldown_period": "Cooldown period (seconds)"
         }
       }
     },
@@ -69,7 +70,8 @@
       "init": {
         "title": "Thermostat Proxy options",
         "data": {
-          "default_sensor": "Default sensor"
+          "default_sensor": "Default sensor",
+          "cooldown_period": "Cooldown period (seconds)"
         }
       }
     },
