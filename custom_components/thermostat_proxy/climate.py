@@ -1225,8 +1225,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             clamped = True
             clamp_reason = "min"
             limit_value = effective_min
-        
-        if effective_max is not None and calculated_target > effective_max:
+        elif effective_max is not None and calculated_target > effective_max:
             calculated_target = effective_max
             clamped = True
             clamp_reason = "max"
