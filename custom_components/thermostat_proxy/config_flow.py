@@ -391,7 +391,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
 
         number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
+            selector.NumberSelectorConfig(max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
         )
         
         # Show current values as defaults during reconfigure (0 = disabled)
@@ -553,7 +553,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
         number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
+            selector.NumberSelectorConfig(max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
         )
         
         # Show current values as defaults in options (0 = disabled)
