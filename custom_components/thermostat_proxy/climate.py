@@ -528,6 +528,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> bool:
         """Return True if we've already asked the thermostat for this target."""
 
+        self._cleanup_expired_pending_requests()
         return any(
             math.isclose(real_target, pending, abs_tol=tolerance)
             for pending, _ts in self._recent_real_target_requests
