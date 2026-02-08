@@ -379,6 +379,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._ssot_swing_mode = self._real_state.attributes.get(
                 "swing_mode"
             )
+            if self._last_real_target_temp is None:
+                self._last_real_target_temp = _coerce_temperature(
+                    self._real_state.attributes.get(ATTR_TEMPERATURE)
+                )
         await self._async_subscribe_to_states()
 
     async def _async_subscribe_to_states(self) -> None:
@@ -433,12 +437,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._temperature_unit = self._discover_temperature_unit()
 
         # --- Single Source of Truth: validate external changes ---
-        if (
-            self._single_source_of_truth
-            and old_state is not None
-            and new_state is not None
-            and old_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
-        ):
+        #
+        # Compare incoming state against the proxy's known-good values
+        # (not old_state, which may itself be corrupted by line-noise).
+        if self._single_source_of_truth:
             time_since_write = time.monotonic() - self._last_real_write_time
             is_likely_our_change = time_since_write < POST_WRITE_GRACE_PERIOD
 
@@ -452,7 +454,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     is_likely_our_change = True
 
             if not is_likely_our_change:
-                if not self._validate_thermostat_change(old_state, new_state):
+                if not self._validate_thermostat_change(new_state):
                     _LOGGER.warning(
                         "Single source of truth: rejected invalid change from %s "
                         "(multiple simultaneous changes detected)",
@@ -464,15 +466,25 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self.async_write_ha_state()
                     return
                 # Valid external change – update SSOT tracked state
-                if old_state.state != new_state.state:
+                new_attrs = new_state.attributes
+                if (
+                    self._ssot_hvac_mode is not None
+                    and new_state.state != self._ssot_hvac_mode
+                ):
                     self._ssot_hvac_mode = new_state.state
-                old_fan = old_state.attributes.get("fan_mode")
-                new_fan = new_state.attributes.get("fan_mode")
-                if old_fan != new_fan and new_fan is not None:
+                new_fan = new_attrs.get("fan_mode")
+                if (
+                    self._ssot_fan_mode is not None
+                    and new_fan is not None
+                    and new_fan != self._ssot_fan_mode
+                ):
                     self._ssot_fan_mode = new_fan
-                old_swing = old_state.attributes.get("swing_mode")
-                new_swing = new_state.attributes.get("swing_mode")
-                if old_swing != new_swing and new_swing is not None:
+                new_swing = new_attrs.get("swing_mode")
+                if (
+                    self._ssot_swing_mode is not None
+                    and new_swing is not None
+                    and new_swing != self._ssot_swing_mode
+                ):
                     self._ssot_swing_mode = new_swing
 
         real_target = self._get_real_target_temperature()
@@ -580,10 +592,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._async_log_physical_override(real_target, switched)
         )
 
-    def _validate_thermostat_change(
-        self, old_state: State, new_state: State
-    ) -> bool:
+    def _validate_thermostat_change(self, new_state: State) -> bool:
         """Return True if a physical device state change is plausible.
+
+        Compares the incoming state against the proxy's **known-good
+        state** (not the previous physical state, which may itself have
+        been corrupted by line-noise).
 
         A person can only make one change at a time: either toggle the HVAC
         mode, adjust the temperature by a single step, or change one
@@ -596,40 +610,60 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         actions.
         """
         changes: list[str] = []
-        old_attrs = old_state.attributes
         new_attrs = new_state.attributes
 
         # 1. HVAC mode (entity state)
-        if old_state.state != new_state.state:
+        if (
+            self._ssot_hvac_mode is not None
+            and new_state.state != self._ssot_hvac_mode
+        ):
             changes.append(
-                f"hvac_mode {old_state.state!r} -> {new_state.state!r}"
+                f"hvac_mode {self._ssot_hvac_mode!r} -> {new_state.state!r}"
             )
 
         # 2. Temperature attributes – each must move by at most one step
+        #    from the proxy's known-good value.
         step = self._target_temp_step
+        known_temps: dict[str, float | None] = {
+            "temperature": self._last_real_target_temp,
+            # target_temp_high / target_temp_low are not independently
+            # tracked yet, so we can only count them as changed when both
+            # sides are present on the physical device.
+            "target_temp_high": None,
+            "target_temp_low": None,
+        }
         for attr in _SSOT_TEMPERATURE_ATTRIBUTES:
-            old_val = _coerce_temperature(old_attrs.get(attr))
+            known_good = known_temps.get(attr)
             new_val = _coerce_temperature(new_attrs.get(attr))
-            if old_val is not None and new_val is not None:
-                temp_diff = abs(new_val - old_val)
+            if known_good is not None and new_val is not None:
+                temp_diff = abs(new_val - known_good)
                 if temp_diff > 0.01:
                     if step is not None and temp_diff > step + 0.01:
                         _LOGGER.debug(
                             "Single source of truth: %s changed by %.1f "
-                            "(max allowed step: %.1f)",
+                            "from known-good %.1f (max allowed step: %.1f)",
                             attr,
                             temp_diff,
+                            known_good,
                             step,
                         )
                         return False
-                    changes.append(f"{attr} {old_val} -> {new_val}")
+                    changes.append(f"{attr} {known_good} -> {new_val}")
 
         # 3. Discrete / enum attributes (fan_mode, swing_mode, …)
+        known_enums: dict[str, str | None] = {
+            "fan_mode": self._ssot_fan_mode,
+            "swing_mode": self._ssot_swing_mode,
+        }
         for attr in _SSOT_ENUM_ATTRIBUTES:
-            old_val = old_attrs.get(attr)
+            known_good = known_enums.get(attr)
             new_val = new_attrs.get(attr)
-            if old_val is not None and new_val is not None and old_val != new_val:
-                changes.append(f"{attr} {old_val!r} -> {new_val!r}")
+            if (
+                known_good is not None
+                and new_val is not None
+                and known_good != new_val
+            ):
+                changes.append(f"{attr} {known_good!r} -> {new_val!r}")
 
         if len(changes) > 1:
             _LOGGER.debug(
