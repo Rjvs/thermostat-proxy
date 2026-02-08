@@ -440,7 +440,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         #
         # Compare incoming state against the proxy's known-good values
         # (not old_state, which may itself be corrupted by line-noise).
-        if self._single_source_of_truth:
+        #
+        # Availability transitions (unavailable / unknown) are NOT user
+        # actions and must never touch the known-good state.  Skip them
+        # entirely so that when the device comes back we still validate
+        # against the real pre-outage baseline.
+        if self._single_source_of_truth and new_state.state not in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+        ):
             time_since_write = time.monotonic() - self._last_real_write_time
             is_likely_our_change = time_since_write < POST_WRITE_GRACE_PERIOD
 
