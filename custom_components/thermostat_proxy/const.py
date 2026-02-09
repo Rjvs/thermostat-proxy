@@ -31,6 +31,9 @@ ATTR_REAL_TARGET_TEMPERATURE = "real_target_temperature"
 ATTR_REAL_CURRENT_HUMIDITY = "real_current_humidity"
 ATTR_SELECTED_SENSOR_OPTIONS = "sensor_options"
 ATTR_UNAVAILABLE_ENTITIES = "unavailable_entities"
+ATTR_SSOT_HVAC_MODE = "ssot_hvac_mode"
+ATTR_SSOT_FAN_MODE = "ssot_fan_mode"
+ATTR_SSOT_SWING_MODE = "ssot_swing_mode"
 
 OVERDRIVE_ADJUSTMENT_HEAT = 1.0
 OVERDRIVE_ADJUSTMENT_COOL = -1.0

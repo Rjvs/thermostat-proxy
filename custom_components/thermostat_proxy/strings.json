@@ -51,6 +51,9 @@
           "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
           "single_source_of_truth": "Single source of truth"
+        },
+        "data_description": {
+          "single_source_of_truth": "Use this Proxy to hold the true state of the thermostat and reject spurious changes, ensuring the physical device follows the Proxy settings."
         }
       }
     },
@@ -79,6 +82,9 @@
           "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
           "single_source_of_truth": "Single source of truth"
+        },
+        "data_description": {
+          "single_source_of_truth": "Use this Proxy to hold the true state of the thermostat and reject spurious changes, ensuring the physical device follows the Proxy settings."
         }
       }
     },

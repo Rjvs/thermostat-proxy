@@ -60,6 +60,9 @@ from .const import (
     ATTR_REAL_TARGET_TEMPERATURE,
     ATTR_REAL_CURRENT_HUMIDITY,
     ATTR_SELECTED_SENSOR_OPTIONS,
+    ATTR_SSOT_FAN_MODE,
+    ATTR_SSOT_HVAC_MODE,
+    ATTR_SSOT_SWING_MODE,
     ATTR_UNAVAILABLE_ENTITIES,
     CONF_PHYSICAL_SENSOR_NAME,
     DEFAULT_NAME,
@@ -373,16 +376,26 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 or self._get_active_sensor_temperature()
                 or self._get_real_current_temperature()
             )
-        if self._single_source_of_truth and self._real_state:
-            self._ssot_hvac_mode = self._real_state.state
-            self._ssot_fan_mode = self._real_state.attributes.get("fan_mode")
-            self._ssot_swing_mode = self._real_state.attributes.get(
-                "swing_mode"
-            )
-            if self._last_real_target_temp is None:
-                self._last_real_target_temp = _coerce_temperature(
-                    self._real_state.attributes.get(ATTR_TEMPERATURE)
+        if self._single_source_of_truth:
+            # Only seed from the physical device when we have no restored
+            # values AND the device is in a valid (non-unavailable) state.
+            if (
+                self._ssot_hvac_mode is None
+                and self._real_state
+                and self._real_state.state
+                not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+            ):
+                self._ssot_hvac_mode = self._real_state.state
+                self._ssot_fan_mode = self._real_state.attributes.get(
+                    "fan_mode"
                 )
+                self._ssot_swing_mode = self._real_state.attributes.get(
+                    "swing_mode"
+                )
+                if self._last_real_target_temp is None:
+                    self._last_real_target_temp = _coerce_temperature(
+                        self._real_state.attributes.get(ATTR_TEMPERATURE)
+                    )
         await self._async_subscribe_to_states()
 
     async def _async_subscribe_to_states(self) -> None:
@@ -449,51 +462,76 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             STATE_UNAVAILABLE,
             STATE_UNKNOWN,
         ):
-            time_since_write = time.monotonic() - self._last_real_write_time
-            is_likely_our_change = time_since_write < POST_WRITE_GRACE_PERIOD
-
-            if not is_likely_our_change:
-                new_target = _coerce_temperature(
-                    new_state.attributes.get(ATTR_TEMPERATURE)
+            # If we have no known-good baseline yet (e.g. first-time setup
+            # where the device was unavailable during init), seed from this
+            # first valid event and skip validation — we have nothing to
+            # compare against.
+            if self._ssot_hvac_mode is None:
+                self._ssot_hvac_mode = new_state.state
+                self._ssot_fan_mode = new_state.attributes.get("fan_mode")
+                self._ssot_swing_mode = new_state.attributes.get(
+                    "swing_mode"
                 )
-                if new_target is not None and self._has_pending_real_target_request(
-                    new_target, PENDING_REQUEST_TOLERANCE_MAX
-                ):
-                    is_likely_our_change = True
+                if self._last_real_target_temp is None:
+                    seed_target = _coerce_temperature(
+                        new_state.attributes.get(ATTR_TEMPERATURE)
+                    )
+                    if seed_target is not None:
+                        self._last_real_target_temp = seed_target
+                _LOGGER.info(
+                    "Single source of truth: initialized baseline for %s "
+                    "(mode=%s)",
+                    self._real_entity_id,
+                    new_state.state,
+                )
+            else:
+                time_since_write = (
+                    time.monotonic() - self._last_real_write_time
+                )
+                is_likely_our_change = (
+                    time_since_write < POST_WRITE_GRACE_PERIOD
+                )
 
-            if not is_likely_our_change:
-                if not self._validate_thermostat_change(new_state):
-                    _LOGGER.warning(
-                        "Single source of truth: rejected invalid change from %s "
-                        "(multiple simultaneous changes detected)",
-                        self._real_entity_id,
+                if not is_likely_our_change:
+                    new_target = _coerce_temperature(
+                        new_state.attributes.get(ATTR_TEMPERATURE)
                     )
-                    self.hass.async_create_task(
-                        self._async_correct_physical_device()
-                    )
-                    self.async_write_ha_state()
-                    return
-                # Valid external change – update SSOT tracked state
-                new_attrs = new_state.attributes
-                if (
-                    self._ssot_hvac_mode is not None
-                    and new_state.state != self._ssot_hvac_mode
-                ):
-                    self._ssot_hvac_mode = new_state.state
-                new_fan = new_attrs.get("fan_mode")
-                if (
-                    self._ssot_fan_mode is not None
-                    and new_fan is not None
-                    and new_fan != self._ssot_fan_mode
-                ):
-                    self._ssot_fan_mode = new_fan
-                new_swing = new_attrs.get("swing_mode")
-                if (
-                    self._ssot_swing_mode is not None
-                    and new_swing is not None
-                    and new_swing != self._ssot_swing_mode
-                ):
-                    self._ssot_swing_mode = new_swing
+                    if (
+                        new_target is not None
+                        and self._has_pending_real_target_request(
+                            new_target, PENDING_REQUEST_TOLERANCE_MAX
+                        )
+                    ):
+                        is_likely_our_change = True
+
+                if not is_likely_our_change:
+                    if not self._validate_thermostat_change(new_state):
+                        _LOGGER.warning(
+                            "Single source of truth: rejected invalid change "
+                            "from %s (multiple simultaneous changes detected)",
+                            self._real_entity_id,
+                        )
+                        self.hass.async_create_task(
+                            self._async_correct_physical_device()
+                        )
+                        self.async_write_ha_state()
+                        return
+                    # Valid external change – update SSOT tracked state
+                    new_attrs = new_state.attributes
+                    if new_state.state != self._ssot_hvac_mode:
+                        self._ssot_hvac_mode = new_state.state
+                    new_fan = new_attrs.get("fan_mode")
+                    if (
+                        new_fan is not None
+                        and new_fan != self._ssot_fan_mode
+                    ):
+                        self._ssot_fan_mode = new_fan
+                    new_swing = new_attrs.get("swing_mode")
+                    if (
+                        new_swing is not None
+                        and new_swing != self._ssot_swing_mode
+                    ):
+                        self._ssot_swing_mode = new_swing
 
         real_target = self._get_real_target_temperature()
 
@@ -1098,6 +1136,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 ),
             }
         )
+        if self._single_source_of_truth:
+            attrs[ATTR_SSOT_HVAC_MODE] = self._ssot_hvac_mode
+            attrs[ATTR_SSOT_FAN_MODE] = self._ssot_fan_mode
+            attrs[ATTR_SSOT_SWING_MODE] = self._ssot_swing_mode
         return attrs
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -1556,6 +1598,17 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
         if restored_real is not None:
             self._last_real_target_temp = restored_real
+
+        if self._single_source_of_truth:
+            restored_ssot_hvac = last_state.attributes.get(ATTR_SSOT_HVAC_MODE)
+            if restored_ssot_hvac is not None:
+                self._ssot_hvac_mode = restored_ssot_hvac
+            restored_ssot_fan = last_state.attributes.get(ATTR_SSOT_FAN_MODE)
+            if restored_ssot_fan is not None:
+                self._ssot_fan_mode = restored_ssot_fan
+            restored_ssot_swing = last_state.attributes.get(ATTR_SSOT_SWING_MODE)
+            if restored_ssot_swing is not None:
+                self._ssot_swing_mode = restored_ssot_swing
 
     def _update_real_temperature_limits(self) -> None:
         if not self._real_state:
