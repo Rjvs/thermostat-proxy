@@ -485,24 +485,37 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     new_state.state,
                 )
             else:
-                time_since_write = (
-                    time.monotonic() - self._last_real_write_time
+                # In SSOT mode we do NOT use a time-based grace period
+                # to skip validation.  If the change truly is ours, it
+                # will match known-good and pass validation naturally.
+                # Only a pending-request value-match bypasses validation,
+                # and only when non-temperature attributes also look sane
+                # (HVAC mode, fan, swing unchanged from known-good).
+                new_target = _coerce_temperature(
+                    new_state.attributes.get(ATTR_TEMPERATURE)
+                )
+                new_attrs = new_state.attributes
+                non_temp_changed = (
+                    new_state.state != self._ssot_hvac_mode
+                    or (
+                        self._ssot_fan_mode is not None
+                        and new_attrs.get("fan_mode") is not None
+                        and new_attrs.get("fan_mode") != self._ssot_fan_mode
+                    )
+                    or (
+                        self._ssot_swing_mode is not None
+                        and new_attrs.get("swing_mode") is not None
+                        and new_attrs.get("swing_mode")
+                        != self._ssot_swing_mode
+                    )
                 )
                 is_likely_our_change = (
-                    time_since_write < POST_WRITE_GRACE_PERIOD
-                )
-
-                if not is_likely_our_change:
-                    new_target = _coerce_temperature(
-                        new_state.attributes.get(ATTR_TEMPERATURE)
+                    new_target is not None
+                    and not non_temp_changed
+                    and self._has_pending_real_target_request(
+                        new_target, PENDING_REQUEST_TOLERANCE_MAX
                     )
-                    if (
-                        new_target is not None
-                        and self._has_pending_real_target_request(
-                            new_target, PENDING_REQUEST_TOLERANCE_MAX
-                        )
-                    ):
-                        is_likely_our_change = True
+                )
 
                 if not is_likely_our_change:
                     if not self._validate_thermostat_change(new_state):
@@ -517,7 +530,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         self.async_write_ha_state()
                         return
                     # Valid external change – update SSOT tracked state
-                    new_attrs = new_state.attributes
                     if new_state.state != self._ssot_hvac_mode:
                         self._ssot_hvac_mode = new_state.state
                     new_fan = new_attrs.get("fan_mode")
@@ -532,6 +544,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         and new_swing != self._ssot_swing_mode
                     ):
                         self._ssot_swing_mode = new_swing
+                    validated_target = _coerce_temperature(
+                        new_attrs.get(ATTR_TEMPERATURE)
+                    )
+                    if validated_target is not None:
+                        self._last_real_target_temp = validated_target
 
         real_target = self._get_real_target_temperature()
 
@@ -544,17 +561,31 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         if real_target is not None:
             previous_real_target = self._last_real_target_temp
-            self._last_real_target_temp = real_target
+
+            # When SSOT is active with a known baseline, do NOT blindly
+            # overwrite _last_real_target_temp.  Only update it at
+            # explicitly validated acceptance points below.
+            ssot_guarding = (
+                self._single_source_of_truth
+                and previous_real_target is not None
+            )
+            if not ssot_guarding:
+                self._last_real_target_temp = real_target
+
             strict_tolerance = self._pending_request_tolerance()
 
             # Two-tiered matching: strict consumes, loose suppresses.
             if self._consume_real_target_request(real_target, strict_tolerance):
+                if ssot_guarding:
+                    self._last_real_target_temp = real_target
                 _LOGGER.debug(
                     "Real target %s matched pending request (strict)", real_target
                 )
             elif self._has_pending_real_target_request(
                 real_target, PENDING_REQUEST_TOLERANCE_MAX
             ):
+                if ssot_guarding:
+                    self._last_real_target_temp = real_target
                 _LOGGER.debug(
                     "Real target %s matched pending request (loose) - ignoring potential external change",
                     real_target,
@@ -564,12 +595,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 time_since_write = time.monotonic() - self._last_real_write_time
                 is_recent_write = time_since_write < POST_WRITE_GRACE_PERIOD
 
+                # When ssot_guarding is True, Section A has already
+                # validated this event (or matched it to a pending
+                # request we sent).  We still need to explicitly accept
+                # the temperature into _last_real_target_temp at each
+                # branch, but we do not need to re-validate.
                 if was_not_controlling:
+                    if ssot_guarding:
+                        self._last_real_target_temp = real_target
                     _LOGGER.debug(
                         "Thermostat returned to active state; updated target to %s without triggering external change",
                         real_target,
                     )
                 elif is_recent_write:
+                    if ssot_guarding:
+                        self._last_real_target_temp = real_target
                     _LOGGER.debug(
                         "Real target %s changed during post-write grace period (%.1fs < %.1fs) - ignoring potential echo",
                         real_target,
@@ -579,6 +619,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 elif not math.isclose(
                     real_target, previous_real_target, abs_tol=EXTERNAL_CHANGE_TOLERANCE
                 ):
+                    if ssot_guarding:
+                        self._last_real_target_temp = real_target
                     _LOGGER.info(
                         "Detected potential external change: %s -> %s (tolerance %s)",
                         previous_real_target,
