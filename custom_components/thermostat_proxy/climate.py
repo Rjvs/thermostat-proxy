@@ -441,6 +441,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         old_state: State | None = event.data.get("old_state")
         new_state: State | None = event.data.get("new_state")
+        previous_real_state = self._real_state
         self._real_state = new_state
         self._update_real_temperature_limits()
         if not new_state:
@@ -524,6 +525,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                             "from %s (multiple simultaneous changes detected)",
                             self._real_entity_id,
                         )
+                        self._real_state = previous_real_state
                         self.hass.async_create_task(
                             self._async_correct_physical_device()
                         )
@@ -764,13 +766,27 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return True
 
     async def _async_correct_physical_device(self) -> None:
-        """Reset the physical device back to the proxy's known-good state."""
+        """Reset the physical device back to the proxy's known-good state.
+
+        Reads the *live* device state from Home Assistant rather than the
+        cached ``_real_state`` because (a) we deliberately restore
+        ``_real_state`` to the pre-rejection value so that properties like
+        ``hvac_mode`` expose the known-good value, and (b) this coroutine
+        runs asynchronously so the device may have changed again by now.
+        """
+        device_state = self.hass.states.get(self._real_entity_id)
+        if not device_state or device_state.state in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+        ):
+            return
+
         corrections: list[str] = []
 
         # Correct HVAC mode
-        if self._ssot_hvac_mode and self._real_state:
+        if self._ssot_hvac_mode:
             try:
-                current_mode = HVACMode(self._real_state.state)
+                current_mode = HVACMode(device_state.state)
             except ValueError:
                 current_mode = None
             try:
@@ -805,7 +821,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         # Correct target temperature
         if self._last_real_target_temp is not None:
-            current_target = self._get_real_target_temperature()
+            current_target = _coerce_temperature(
+                device_state.attributes.get(ATTR_TEMPERATURE)
+            )
             if current_target is not None and not math.isclose(
                 current_target, self._last_real_target_temp, abs_tol=0.1
             ):
@@ -836,8 +854,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     )
 
         # Correct fan mode
-        if self._ssot_fan_mode is not None and self._real_state:
-            current_fan = self._real_state.attributes.get("fan_mode")
+        if self._ssot_fan_mode is not None:
+            current_fan = device_state.attributes.get("fan_mode")
             if current_fan is not None and current_fan != self._ssot_fan_mode:
                 from homeassistant.components.climate.const import (
                     ATTR_FAN_MODE,
@@ -865,8 +883,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     )
 
         # Correct swing mode
-        if self._ssot_swing_mode is not None and self._real_state:
-            current_swing = self._real_state.attributes.get("swing_mode")
+        if self._ssot_swing_mode is not None:
+            current_swing = device_state.attributes.get("swing_mode")
             if (
                 current_swing is not None
                 and current_swing != self._ssot_swing_mode
