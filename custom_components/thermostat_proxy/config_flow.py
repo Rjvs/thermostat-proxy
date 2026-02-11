@@ -14,6 +14,7 @@ from homeassistant.util import slugify
 
 from .const import (
     CONF_DEFAULT_SENSOR,
+    CONF_IGNORE_THERMOSTAT,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_SENSOR_ENTITY_ID,
     CONF_SENSOR_NAME,
@@ -62,6 +63,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._min_temp: float | None = None
         self._max_temp: float | None = None
         self._single_source_of_truth: bool = False
+        self._ignore_thermostat: bool = False
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
@@ -129,6 +131,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._max_temp = entry.data.get(CONF_MAX_TEMP)
         self._single_source_of_truth = entry.data.get(
             CONF_SINGLE_SOURCE_OF_TRUTH, False
+        )
+        self._ignore_thermostat = entry.data.get(
+            CONF_IGNORE_THERMOSTAT, False
         )
         self._use_last_active_sensor = entry.data.get(
             CONF_USE_LAST_ACTIVE_SENSOR, False
@@ -316,6 +321,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             min_temp = user_input.get(CONF_MIN_TEMP) or None
             max_temp = user_input.get(CONF_MAX_TEMP) or None
             single_source_of_truth = user_input.get(CONF_SINGLE_SOURCE_OF_TRUTH, False)
+            ignore_thermostat = user_input.get(CONF_IGNORE_THERMOSTAT, False)
 
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
@@ -343,6 +349,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._min_temp = min_temp
                 self._max_temp = max_temp
                 self._single_source_of_truth = single_source_of_truth
+                self._ignore_thermostat = ignore_thermostat
                 self._use_last_active_sensor = use_last_active_sensor
 
                 sensor_names_with_physical = list(sensor_names)
@@ -358,6 +365,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_MIN_TEMP: min_temp,
                     CONF_MAX_TEMP: max_temp,
                     CONF_SINGLE_SOURCE_OF_TRUTH: single_source_of_truth,
+                    CONF_IGNORE_THERMOSTAT: ignore_thermostat,
                 }
                 if self._use_last_active_sensor:
                     data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -411,6 +419,11 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema_fields[
             vol.Optional(
                 CONF_SINGLE_SOURCE_OF_TRUTH, default=self._single_source_of_truth
+            )
+        ] = selector.BooleanSelector()
+        schema_fields[
+            vol.Optional(
+                CONF_IGNORE_THERMOSTAT, default=self._ignore_thermostat
             )
         ] = selector.BooleanSelector()
 
@@ -506,6 +519,10 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_SINGLE_SOURCE_OF_TRUTH,
             self.config_entry.data.get(CONF_SINGLE_SOURCE_OF_TRUTH, False),
         )
+        current_ignore_thermostat = self.config_entry.options.get(
+            CONF_IGNORE_THERMOSTAT,
+            self.config_entry.data.get(CONF_IGNORE_THERMOSTAT, False),
+        )
 
         if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
             use_last_active_sensor = True
@@ -535,6 +552,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 data[CONF_MIN_TEMP] = min_temp
                 data[CONF_MAX_TEMP] = max_temp
                 data[CONF_SINGLE_SOURCE_OF_TRUTH] = user_input.get(CONF_SINGLE_SOURCE_OF_TRUTH, False)
+                data[CONF_IGNORE_THERMOSTAT] = user_input.get(CONF_IGNORE_THERMOSTAT, False)
 
                 return self.async_create_entry(title="", data=data)
 
@@ -584,6 +602,12 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_SINGLE_SOURCE_OF_TRUTH,
                 default=current_single_source_of_truth,
+            )
+        ] = selector.BooleanSelector()
+        schema_fields[
+            vol.Optional(
+                CONF_IGNORE_THERMOSTAT,
+                default=current_ignore_thermostat,
             )
         ] = selector.BooleanSelector()
 

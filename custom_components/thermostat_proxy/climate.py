@@ -56,6 +56,7 @@ from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from .const import (
     ATTR_ACTIVE_SENSOR,
     ATTR_ACTIVE_SENSOR_ENTITY_ID,
+    ATTR_IGNORE_THERMOSTAT,
     ATTR_REAL_CURRENT_TEMPERATURE,
     ATTR_REAL_TARGET_TEMPERATURE,
     ATTR_REAL_CURRENT_HUMIDITY,
@@ -64,6 +65,7 @@ from .const import (
     ATTR_SSOT_HVAC_MODE,
     ATTR_SSOT_SWING_MODE,
     ATTR_UNAVAILABLE_ENTITIES,
+    CONF_IGNORE_THERMOSTAT,
     CONF_PHYSICAL_SENSOR_NAME,
     DEFAULT_NAME,
     OVERDRIVE_ADJUSTMENT_COOL,
@@ -111,6 +113,8 @@ _RESERVED_REAL_ATTRIBUTES = {
     "supported_features",
     "fan_mode",
     "fan_modes",
+    "swing_mode",
+    "swing_modes",
     "current_humidity",
     "min_temp",
     "max_temp",
@@ -154,6 +158,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
         vol.Optional(CONF_MAX_TEMP): vol.Coerce(float),
         vol.Optional(CONF_SINGLE_SOURCE_OF_TRUTH, default=False): cv.boolean,
+        vol.Optional(CONF_IGNORE_THERMOSTAT, default=False): cv.boolean,
     }
 )
 
@@ -189,6 +194,7 @@ async def async_setup_platform(
                 user_min_temp=config.get(CONF_MIN_TEMP),
                 user_max_temp=config.get(CONF_MAX_TEMP),
                 single_source_of_truth=config.get(CONF_SINGLE_SOURCE_OF_TRUTH, False),
+                ignore_thermostat=config.get(CONF_IGNORE_THERMOSTAT, False),
             )
         ]
     )
@@ -236,6 +242,10 @@ async def async_setup_entry(
         CONF_SINGLE_SOURCE_OF_TRUTH,
         data.get(CONF_SINGLE_SOURCE_OF_TRUTH, False),
     )
+    ignore_thermostat = entry.options.get(
+        CONF_IGNORE_THERMOSTAT,
+        data.get(CONF_IGNORE_THERMOSTAT, False),
+    )
 
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
@@ -266,6 +276,7 @@ async def async_setup_entry(
                 user_min_temp=user_min_temp,
                 user_max_temp=user_max_temp,
                 single_source_of_truth=single_source_of_truth,
+                ignore_thermostat=ignore_thermostat,
             )
         ]
     )
@@ -299,6 +310,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         user_min_temp: float | None = None,
         user_max_temp: float | None = None,
         single_source_of_truth: bool = False,
+        ignore_thermostat: bool = False,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -354,6 +366,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._ssot_hvac_mode: str | None = None
         self._ssot_fan_mode: str | None = None
         self._ssot_swing_mode: str | None = None
+        self._ignore_thermostat = ignore_thermostat
 
     async def async_added_to_hass(self) -> None:
         """Finish setup when entity is added."""
@@ -486,12 +499,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     new_state.state,
                 )
             else:
-                # In SSOT mode we do NOT use a time-based grace period
-                # to skip validation.  If the change truly is ours, it
-                # will match known-good and pass validation naturally.
-                # Only a pending-request value-match bypasses validation,
-                # and only when non-temperature attributes also look sane
-                # (HVAC mode, fan, swing unchanged from known-good).
+                # Compute shared state used by both ignore-thermostat
+                # and regular SSOT validation.
                 new_target = _coerce_temperature(
                     new_state.attributes.get(ATTR_TEMPERATURE)
                 )
@@ -518,7 +527,66 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     )
                 )
 
-                if not is_likely_our_change:
+                if self._ignore_thermostat and not is_likely_our_change:
+                    # Block ALL external changes and log diffs for
+                    # diagnostics.  Only our own command echoes (matched
+                    # by is_likely_our_change above) are allowed through.
+                    diffs: list[str] = []
+                    if new_state.state != self._ssot_hvac_mode:
+                        diffs.append(
+                            f"hvac_mode: {self._ssot_hvac_mode!r} -> "
+                            f"{new_state.state!r}"
+                        )
+                    if (
+                        new_target is not None
+                        and self._last_real_target_temp is not None
+                        and not math.isclose(
+                            new_target,
+                            self._last_real_target_temp,
+                            abs_tol=0.1,
+                        )
+                    ):
+                        diffs.append(
+                            f"temperature: {self._last_real_target_temp} -> "
+                            f"{new_target}"
+                        )
+                    new_fan = new_attrs.get("fan_mode")
+                    if (
+                        self._ssot_fan_mode is not None
+                        and new_fan is not None
+                        and new_fan != self._ssot_fan_mode
+                    ):
+                        diffs.append(
+                            f"fan_mode: {self._ssot_fan_mode!r} -> "
+                            f"{new_fan!r}"
+                        )
+                    new_swing = new_attrs.get("swing_mode")
+                    if (
+                        self._ssot_swing_mode is not None
+                        and new_swing is not None
+                        and new_swing != self._ssot_swing_mode
+                    ):
+                        diffs.append(
+                            f"swing_mode: {self._ssot_swing_mode!r} -> "
+                            f"{new_swing!r}"
+                        )
+                    if diffs:
+                        _LOGGER.warning(
+                            "Ignore thermostat: blocked change from %s: %s",
+                            self._real_entity_id,
+                            "; ".join(diffs),
+                        )
+                        self._real_state = previous_real_state
+                        self.hass.async_create_task(
+                            self._async_correct_physical_device()
+                        )
+                        self.async_write_ha_state()
+                        return
+                    # No diffs — state matches proxy, allow through
+
+                elif not is_likely_our_change:
+                    # Regular SSOT validation: reject compound changes,
+                    # accept valid single-attribute changes.
                     if not self._validate_thermostat_change(new_state):
                         _LOGGER.warning(
                             "Single source of truth: rejected invalid change "
@@ -1200,6 +1268,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             attrs[ATTR_SSOT_HVAC_MODE] = self._ssot_hvac_mode
             attrs[ATTR_SSOT_FAN_MODE] = self._ssot_fan_mode
             attrs[ATTR_SSOT_SWING_MODE] = self._ssot_swing_mode
+            attrs[ATTR_IGNORE_THERMOSTAT] = self._ignore_thermostat
         return attrs
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -1320,6 +1389,26 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             {
                 ATTR_ENTITY_ID: self._real_entity_id,
                 ATTR_FAN_MODE: fan_mode,
+            },
+            blocking=True,
+        )
+
+    async def async_set_swing_mode(self, swing_mode: str) -> None:
+        """Set new target swing mode."""
+        from homeassistant.components.climate.const import (
+            ATTR_SWING_MODE,
+            SERVICE_SET_SWING_MODE,
+        )
+
+        if self._single_source_of_truth:
+            self._ssot_swing_mode = swing_mode
+        self._last_real_write_time = time.monotonic()
+        await self.hass.services.async_call(
+            CLIMATE_DOMAIN,
+            SERVICE_SET_SWING_MODE,
+            {
+                ATTR_ENTITY_ID: self._real_entity_id,
+                ATTR_SWING_MODE: swing_mode,
             },
             blocking=True,
         )
@@ -1704,7 +1793,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
         if supported & ClimateEntityFeature.FAN_MODE:
             base_features |= ClimateEntityFeature.FAN_MODE
-            
+        if supported & ClimateEntityFeature.SWING_MODE:
+            base_features |= ClimateEntityFeature.SWING_MODE
+
         self._attr_supported_features = base_features
 
     def _update_sensor_health_from_state(self, entity_id: str | None, state: State | None) -> None:
@@ -2015,6 +2106,20 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Return the list of available fan modes."""
         if self._real_state:
             return self._real_state.attributes.get("fan_modes")
+        return None
+
+    @property
+    def swing_mode(self) -> str | None:
+        """Return the swing setting."""
+        if self._real_state:
+            return self._real_state.attributes.get("swing_mode")
+        return None
+
+    @property
+    def swing_modes(self) -> list[str] | None:
+        """Return the list of available swing modes."""
+        if self._real_state:
+            return self._real_state.attributes.get("swing_modes")
         return None
 
     @property

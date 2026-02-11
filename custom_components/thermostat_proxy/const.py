@@ -21,6 +21,7 @@ CONF_COOLDOWN_PERIOD = "cooldown_period"
 CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
 CONF_SINGLE_SOURCE_OF_TRUTH = "single_source_of_truth"
+CONF_IGNORE_THERMOSTAT = "ignore_thermostat"
 
 DEFAULT_COOLDOWN_PERIOD = 0
 
@@ -34,6 +35,7 @@ ATTR_UNAVAILABLE_ENTITIES = "unavailable_entities"
 ATTR_SSOT_HVAC_MODE = "ssot_hvac_mode"
 ATTR_SSOT_FAN_MODE = "ssot_fan_mode"
 ATTR_SSOT_SWING_MODE = "ssot_swing_mode"
+ATTR_IGNORE_THERMOSTAT = "ignore_thermostat"
 
 OVERDRIVE_ADJUSTMENT_HEAT = 1.0
 OVERDRIVE_ADJUSTMENT_COOL = -1.0
