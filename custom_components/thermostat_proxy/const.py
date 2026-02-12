@@ -22,6 +22,8 @@ CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
 CONF_SINGLE_SOURCE_OF_TRUTH = "single_source_of_truth"
 CONF_IGNORE_THERMOSTAT = "ignore_thermostat"
+CONF_SSOT_SETTINGS = "ssot_settings"
+CONF_IT_SETTINGS = "it_settings"
 
 DEFAULT_COOLDOWN_PERIOD = 0
 

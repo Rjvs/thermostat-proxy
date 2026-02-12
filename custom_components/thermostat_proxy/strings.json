@@ -50,12 +50,12 @@
           "cooldown_period": "Minimum adjustment interval (seconds)",
           "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
-          "single_source_of_truth": "Single source of truth",
-          "ignore_thermostat": "Ignore thermostat"
+          "ssot_settings": "Single source of truth settings",
+          "it_settings": "Ignore thermostat settings"
         },
         "data_description": {
-          "single_source_of_truth": "Use this Proxy to hold the true state of the thermostat and reject spurious changes, ensuring the physical device follows the Proxy settings.",
-          "ignore_thermostat": "Block all changes from the physical thermostat and always correct back to proxy settings. Changes are logged for diagnostics. Requires Single Source of Truth."
+          "ssot_settings": "Settings where the Proxy holds the true state, rejecting spurious changes from the physical device.",
+          "it_settings": "Settings where ALL changes from the physical thermostat are blocked. The Proxy always corrects back to its values. Changes are logged for diagnostics. These settings are automatically also SSOT-tracked."
         }
       }
     },
@@ -83,12 +83,12 @@
           "cooldown_period": "Minimum adjustment interval (seconds)",
           "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
-          "single_source_of_truth": "Single source of truth",
-          "ignore_thermostat": "Ignore thermostat"
+          "ssot_settings": "Single source of truth settings",
+          "it_settings": "Ignore thermostat settings"
         },
         "data_description": {
-          "single_source_of_truth": "Use this Proxy to hold the true state of the thermostat and reject spurious changes, ensuring the physical device follows the Proxy settings.",
-          "ignore_thermostat": "Block all changes from the physical thermostat and always correct back to proxy settings. Changes are logged for diagnostics. Requires Single Source of Truth."
+          "ssot_settings": "Settings where the Proxy holds the true state, rejecting spurious changes from the physical device.",
+          "it_settings": "Settings where ALL changes from the physical thermostat are blocked. The Proxy always corrects back to its values. Changes are logged for diagnostics. These settings are automatically also SSOT-tracked."
         }
       }
     },

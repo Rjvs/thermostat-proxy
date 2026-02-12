@@ -9,6 +9,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import voluptuous as vol
@@ -66,7 +67,9 @@ from .const import (
     ATTR_SSOT_SWING_MODE,
     ATTR_UNAVAILABLE_ENTITIES,
     CONF_IGNORE_THERMOSTAT,
+    CONF_IT_SETTINGS,
     CONF_PHYSICAL_SENSOR_NAME,
+    CONF_SSOT_SETTINGS,
     DEFAULT_NAME,
     OVERDRIVE_ADJUSTMENT_COOL,
     OVERDRIVE_ADJUSTMENT_HEAT,
@@ -136,6 +139,67 @@ _SSOT_ENUM_ATTRIBUTES = frozenset({
     "swing_mode",
 })
 
+
+class TrackableSetting(Enum):
+    """Writable climate attributes tracked for echo detection and SSOT.
+
+    Each member carries metadata for dispatch-free extraction and comparison:
+      attr_key  – attribute name in state.attributes (or state.state for HVAC_MODE)
+      is_state  – True means read from state.state instead of state.attributes
+      is_numeric – True means use math.isclose for comparison (temperature-like)
+    """
+
+    HVAC_MODE = ("hvac_mode", True, False)
+    TEMPERATURE = ("temperature", False, True)
+    FAN_MODE = ("fan_mode", False, False)
+    SWING_MODE = ("swing_mode", False, False)
+    TARGET_TEMP_HIGH = ("target_temp_high", False, True)
+    TARGET_TEMP_LOW = ("target_temp_low", False, True)
+    TARGET_HUMIDITY = ("target_humidity", False, True)
+
+    def __init__(
+        self, attr_key: str, is_state: bool, is_numeric: bool
+    ) -> None:
+        self.attr_key = attr_key
+        self.is_state = is_state
+        self.is_numeric = is_numeric
+
+    def read_from(self, state: State) -> Any:
+        """Extract this setting's value from a HA State object."""
+        if self.is_state:
+            return state.state
+        raw = state.attributes.get(self.attr_key)
+        if self.is_numeric:
+            return _coerce_temperature(raw)
+        return raw
+
+    def values_match(
+        self, a: Any, b: Any, tolerance: float | None = None
+    ) -> bool:
+        """Compare two values for this setting type."""
+        if a is None or b is None:
+            return a is b
+        if self.is_numeric:
+            tol = (
+                tolerance
+                if tolerance is not None
+                else PENDING_REQUEST_TOLERANCE_MAX
+            )
+            return math.isclose(a, b, abs_tol=tol)
+        return a == b
+
+
+# Lookup by attr_key string → TrackableSetting member.
+_TRACKABLE_SETTING_BY_KEY: dict[str, TrackableSetting] = {
+    s.attr_key: s for s in TrackableSetting
+}
+
+# Core settings always tracked for echo detection when the device is available.
+_CORE_TRACKED_SETTINGS: set[TrackableSetting] = {
+    TrackableSetting.HVAC_MODE,
+    TrackableSetting.TEMPERATURE,
+}
+
 SENSOR_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_SENSOR_NAME): cv.string,
@@ -195,6 +259,8 @@ async def async_setup_platform(
                 user_max_temp=config.get(CONF_MAX_TEMP),
                 single_source_of_truth=config.get(CONF_SINGLE_SOURCE_OF_TRUTH, False),
                 ignore_thermostat=config.get(CONF_IGNORE_THERMOSTAT, False),
+                ssot_settings=config.get(CONF_SSOT_SETTINGS),
+                it_settings=config.get(CONF_IT_SETTINGS),
             )
         ]
     )
@@ -246,6 +312,14 @@ async def async_setup_entry(
         CONF_IGNORE_THERMOSTAT,
         data.get(CONF_IGNORE_THERMOSTAT, False),
     )
+    ssot_settings = entry.options.get(
+        CONF_SSOT_SETTINGS,
+        data.get(CONF_SSOT_SETTINGS),
+    )
+    it_settings = entry.options.get(
+        CONF_IT_SETTINGS,
+        data.get(CONF_IT_SETTINGS),
+    )
 
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
@@ -277,6 +351,8 @@ async def async_setup_entry(
                 user_max_temp=user_max_temp,
                 single_source_of_truth=single_source_of_truth,
                 ignore_thermostat=ignore_thermostat,
+                ssot_settings=ssot_settings,
+                it_settings=it_settings,
             )
         ]
     )
@@ -311,6 +387,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         user_max_temp: float | None = None,
         single_source_of_truth: bool = False,
         ignore_thermostat: bool = False,
+        ssot_settings: list[str] | None = None,
+        it_settings: list[str] | None = None,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -347,8 +425,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._virtual_target_temperature: float | None = None
         self._temperature_unit: str | None = None
         self._real_state: State | None = None
-        self._last_requested_real_target: float | None = None
-        self._recent_real_target_requests: list[tuple[float, float]] = []  # (target, timestamp)
+        self._pending_setting_requests: dict[
+            TrackableSetting, list[tuple[Any, float]]
+        ] = {s: [] for s in TrackableSetting}
         self._last_real_target_temp: float | None = None
         self._unsub_listeners: list[Callable[[], None]] = []
         self._min_temp: float | None = None
@@ -362,11 +441,43 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._sensor_realign_task: asyncio.Task | None = None
         self._suppress_sync_logs_until: float | None = None
         self._cooldown_timer_unsub: Callable[[], None] | None = None
-        self._single_source_of_truth = single_source_of_truth
+        # Per-setting SSOT / Ignore-Thermostat configuration.
+        # Migrate old boolean config to new per-setting lists.
+        if ssot_settings is not None:
+            self._ssot_settings: set[TrackableSetting] = {
+                _TRACKABLE_SETTING_BY_KEY[s]
+                for s in ssot_settings
+                if s in _TRACKABLE_SETTING_BY_KEY
+            }
+        elif single_source_of_truth:
+            # Old boolean → all settings
+            self._ssot_settings = set(TrackableSetting)
+        else:
+            self._ssot_settings = set()
+
+        if it_settings is not None:
+            self._it_settings: set[TrackableSetting] = {
+                _TRACKABLE_SETTING_BY_KEY[s]
+                for s in it_settings
+                if s in _TRACKABLE_SETTING_BY_KEY
+            }
+        elif ignore_thermostat:
+            # Old boolean → all settings
+            self._it_settings = set(TrackableSetting)
+        else:
+            self._it_settings = set()
+
+        # IT implies SSOT for those settings.
+        self._ssot_settings |= self._it_settings
+
         self._ssot_hvac_mode: str | None = None
         self._ssot_fan_mode: str | None = None
         self._ssot_swing_mode: str | None = None
-        self._ignore_thermostat = ignore_thermostat
+        # Active tracked settings — populated in _update_real_temperature_limits
+        # based on device capabilities.  Start with core set.
+        self._active_tracked_settings: set[TrackableSetting] = set(
+            _CORE_TRACKED_SETTINGS
+        )
 
     async def async_added_to_hass(self) -> None:
         """Finish setup when entity is added."""
@@ -499,82 +610,43 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     new_state.state,
                 )
             else:
-                # Compute shared state used by both ignore-thermostat
-                # and regular SSOT validation.
-                new_target = _coerce_temperature(
-                    new_state.attributes.get(ATTR_TEMPERATURE)
-                )
-                new_attrs = new_state.attributes
-                non_temp_changed = (
-                    new_state.state != self._ssot_hvac_mode
-                    or (
-                        self._ssot_fan_mode is not None
-                        and new_attrs.get("fan_mode") is not None
-                        and new_attrs.get("fan_mode") != self._ssot_fan_mode
-                    )
-                    or (
-                        self._ssot_swing_mode is not None
-                        and new_attrs.get("swing_mode") is not None
-                        and new_attrs.get("swing_mode")
-                        != self._ssot_swing_mode
-                    )
-                )
-                is_likely_our_change = (
-                    new_target is not None
-                    and not non_temp_changed
-                    and self._has_pending_real_target_request(
-                        new_target, PENDING_REQUEST_TOLERANCE_MAX
-                    )
-                )
+                # Deterministic echo detection: check ALL active tracked
+                # settings against both baselines and pending requests.
+                is_echo = self._is_echo_of_our_change(new_state)
 
-                if self._ignore_thermostat and not is_likely_our_change:
-                    # Block ALL external changes and log diffs for
-                    # diagnostics.  Only our own command echoes (matched
-                    # by is_likely_our_change above) are allowed through.
-                    diffs: list[str] = []
-                    if new_state.state != self._ssot_hvac_mode:
-                        diffs.append(
-                            f"hvac_mode: {self._ssot_hvac_mode!r} -> "
-                            f"{new_state.state!r}"
+                if is_echo:
+                    # All changed attributes match either baseline or a
+                    # pending request we sent.  Consume matched pendings.
+                    self._consume_echo_pending_requests(new_state)
+                    # Fall through to Section B (temperature tracking).
+                else:
+                    # Classify each setting's change as IT-blocked,
+                    # SSOT-validated, or untracked.
+                    blocked_diffs: list[str] = []
+                    ssot_changes: list[str] = []
+                    for setting in self._active_tracked_settings:
+                        incoming = setting.read_from(new_state)
+                        baseline = self._get_ssot_baseline(setting)
+                        if incoming is None or baseline is None:
+                            continue
+                        if setting.values_match(incoming, baseline):
+                            continue
+                        diff_str = (
+                            f"{setting.attr_key}: "
+                            f"{baseline!r} -> {incoming!r}"
                         )
-                    if (
-                        new_target is not None
-                        and self._last_real_target_temp is not None
-                        and not math.isclose(
-                            new_target,
-                            self._last_real_target_temp,
-                            abs_tol=0.1,
-                        )
-                    ):
-                        diffs.append(
-                            f"temperature: {self._last_real_target_temp} -> "
-                            f"{new_target}"
-                        )
-                    new_fan = new_attrs.get("fan_mode")
-                    if (
-                        self._ssot_fan_mode is not None
-                        and new_fan is not None
-                        and new_fan != self._ssot_fan_mode
-                    ):
-                        diffs.append(
-                            f"fan_mode: {self._ssot_fan_mode!r} -> "
-                            f"{new_fan!r}"
-                        )
-                    new_swing = new_attrs.get("swing_mode")
-                    if (
-                        self._ssot_swing_mode is not None
-                        and new_swing is not None
-                        and new_swing != self._ssot_swing_mode
-                    ):
-                        diffs.append(
-                            f"swing_mode: {self._ssot_swing_mode!r} -> "
-                            f"{new_swing!r}"
-                        )
-                    if diffs:
+                        if setting in self._it_settings:
+                            blocked_diffs.append(diff_str)
+                        elif setting in self._ssot_settings:
+                            ssot_changes.append(diff_str)
+                        # else: untracked setting — ignore
+
+                    if blocked_diffs:
+                        # IT blocks present: reject everything and correct.
                         _LOGGER.warning(
                             "Ignore thermostat: blocked change from %s: %s",
                             self._real_entity_id,
-                            "; ".join(diffs),
+                            "; ".join(blocked_diffs + ssot_changes),
                         )
                         self._real_state = previous_real_state
                         self.hass.async_create_task(
@@ -582,43 +654,37 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         )
                         self.async_write_ha_state()
                         return
-                    # No diffs — state matches proxy, allow through
 
-                elif not is_likely_our_change:
-                    # Regular SSOT validation: reject compound changes,
-                    # accept valid single-attribute changes.
-                    if not self._validate_thermostat_change(new_state):
-                        _LOGGER.warning(
-                            "Single source of truth: rejected invalid change "
-                            "from %s (multiple simultaneous changes detected)",
-                            self._real_entity_id,
-                        )
-                        self._real_state = previous_real_state
-                        self.hass.async_create_task(
-                            self._async_correct_physical_device()
-                        )
-                        self.async_write_ha_state()
-                        return
-                    # Valid external change – update SSOT tracked state
-                    if new_state.state != self._ssot_hvac_mode:
-                        self._ssot_hvac_mode = new_state.state
-                    new_fan = new_attrs.get("fan_mode")
-                    if (
-                        new_fan is not None
-                        and new_fan != self._ssot_fan_mode
-                    ):
-                        self._ssot_fan_mode = new_fan
-                    new_swing = new_attrs.get("swing_mode")
-                    if (
-                        new_swing is not None
-                        and new_swing != self._ssot_swing_mode
-                    ):
-                        self._ssot_swing_mode = new_swing
-                    validated_target = _coerce_temperature(
-                        new_attrs.get(ATTR_TEMPERATURE)
-                    )
-                    if validated_target is not None:
-                        self._last_real_target_temp = validated_target
+                    if ssot_changes:
+                        # SSOT validation: reject compound changes,
+                        # validate step sizes.
+                        if not self._validate_thermostat_change(new_state):
+                            _LOGGER.warning(
+                                "Single source of truth: rejected invalid "
+                                "change from %s (multiple simultaneous "
+                                "changes detected)",
+                                self._real_entity_id,
+                            )
+                            self._real_state = previous_real_state
+                            self.hass.async_create_task(
+                                self._async_correct_physical_device()
+                            )
+                            self.async_write_ha_state()
+                            return
+                        # Valid single-attribute SSOT change — update
+                        # baselines for changed settings.
+                        for setting in self._active_tracked_settings:
+                            incoming = setting.read_from(new_state)
+                            baseline = self._get_ssot_baseline(setting)
+                            if (
+                                incoming is not None
+                                and baseline is not None
+                                and not setting.values_match(
+                                    incoming, baseline
+                                )
+                            ):
+                                self._set_ssot_baseline(setting, incoming)
+                    # Fall through to Section B.
 
         real_target = self._get_real_target_temperature()
 
@@ -868,6 +934,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 and current_mode != desired_mode
             ):
                 corrections.append(f"hvac_mode={desired_mode.value}")
+                self._record_setting_request(
+                    TrackableSetting.HVAC_MODE, desired_mode.value
+                )
                 self._last_real_write_time = time.monotonic()
                 try:
                     await self.hass.services.async_call(
@@ -931,6 +1000,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
 
                 corrections.append(f"fan_mode={self._ssot_fan_mode}")
+                self._record_setting_request(
+                    TrackableSetting.FAN_MODE, self._ssot_fan_mode
+                )
                 self._last_real_write_time = time.monotonic()
                 try:
                     await self.hass.services.async_call(
@@ -963,6 +1035,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
 
                 corrections.append(f"swing_mode={self._ssot_swing_mode}")
+                self._record_setting_request(
+                    TrackableSetting.SWING_MODE, self._ssot_swing_mode
+                )
                 self._last_real_write_time = time.monotonic()
                 try:
                     await self.hass.services.async_call(
@@ -1001,17 +1076,147 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 blocking=False,
             )
 
+    # ---- Generic pending-request tracking for all TrackableSettings ----
+
+    def _record_setting_request(
+        self, setting: TrackableSetting, value: Any
+    ) -> None:
+        """Record that we sent *value* for *setting* to the physical device."""
+        requests = self._pending_setting_requests[setting]
+        requests.append((value, time.monotonic()))
+        if len(requests) > MAX_TRACKED_REAL_TARGET_REQUESTS:
+            requests.pop(0)
+
+    def _has_pending_setting_request(
+        self,
+        setting: TrackableSetting,
+        value: Any,
+        tolerance: float | None = None,
+    ) -> bool:
+        """Return True if we have a pending request matching *value*."""
+        self._cleanup_pending_requests(setting)
+        for pending, _ts in self._pending_setting_requests[setting]:
+            if setting.values_match(value, pending, tolerance):
+                return True
+        return False
+
+    def _consume_pending_setting_request(
+        self,
+        setting: TrackableSetting,
+        value: Any,
+        tolerance: float | None = None,
+    ) -> bool:
+        """Consume (remove) the first pending request matching *value*.
+
+        Returns True if a match was found and consumed.
+        """
+        self._cleanup_pending_requests(setting)
+        requests = self._pending_setting_requests[setting]
+        for i, (pending, _ts) in enumerate(requests):
+            if setting.values_match(value, pending, tolerance):
+                del requests[i]
+                return True
+        return False
+
+    def _remove_pending_setting_request(
+        self, setting: TrackableSetting, value: Any
+    ) -> None:
+        """Remove a pending request (e.g. after a failed service call)."""
+        requests = self._pending_setting_requests[setting]
+        tolerance = (
+            self._pending_request_tolerance() if setting.is_numeric else None
+        )
+        for i, (pending, _ts) in enumerate(requests):
+            if setting.values_match(value, pending, tolerance):
+                del requests[i]
+                break
+
+    def _cleanup_pending_requests(
+        self, setting: TrackableSetting
+    ) -> None:
+        """Remove expired pending requests for *setting*."""
+        now = time.monotonic()
+        requests = self._pending_setting_requests[setting]
+        self._pending_setting_requests[setting] = [
+            (v, ts) for v, ts in requests if now - ts < PENDING_REQUEST_TIMEOUT
+        ]
+
+    # ---- SSOT baseline helpers ----
+
+    def _get_ssot_baseline(self, setting: TrackableSetting) -> Any:
+        """Return the known-good baseline value for *setting*."""
+        if setting == TrackableSetting.HVAC_MODE:
+            return self._ssot_hvac_mode
+        if setting == TrackableSetting.TEMPERATURE:
+            return self._last_real_target_temp
+        if setting == TrackableSetting.FAN_MODE:
+            return self._ssot_fan_mode
+        if setting == TrackableSetting.SWING_MODE:
+            return self._ssot_swing_mode
+        return None  # Future settings not yet baselined
+
+    def _set_ssot_baseline(
+        self, setting: TrackableSetting, value: Any
+    ) -> None:
+        """Update the known-good baseline for *setting*."""
+        if setting == TrackableSetting.HVAC_MODE:
+            self._ssot_hvac_mode = value
+        elif setting == TrackableSetting.TEMPERATURE:
+            self._last_real_target_temp = value
+        elif setting == TrackableSetting.FAN_MODE:
+            self._ssot_fan_mode = value
+        elif setting == TrackableSetting.SWING_MODE:
+            self._ssot_swing_mode = value
+
+    # ---- Deterministic echo detection ----
+
+    def _is_echo_of_our_change(self, new_state: State) -> bool:
+        """Return True if *new_state* is an echo of a command we sent.
+
+        An echo is an event where EVERY changed attribute either matches
+        its SSOT baseline or a pending request we sent.  Checked across
+        ALL active tracked settings regardless of SSOT/IT config.
+        """
+        for setting in self._active_tracked_settings:
+            incoming = setting.read_from(new_state)
+            baseline = self._get_ssot_baseline(setting)
+            if incoming is None or baseline is None:
+                continue  # Can't evaluate unknown attributes
+            if setting.values_match(incoming, baseline):
+                continue  # Matches baseline — no change
+            if self._has_pending_setting_request(setting, incoming):
+                continue  # Matches a pending request we sent
+            return False  # Changed and NOT our echo
+        return True
+
+    def _consume_echo_pending_requests(self, new_state: State) -> None:
+        """Consume pending requests that match the incoming echo state."""
+        for setting in self._active_tracked_settings:
+            incoming = setting.read_from(new_state)
+            if incoming is not None:
+                self._consume_pending_setting_request(setting, incoming)
+
+    # ---- Backward-compat thin wrappers for temperature pending requests ----
+    # These delegate to the generic system so that Section B (target temperature
+    # tracking with strict/loose tolerance) continues to work unchanged.
+
+    @property
+    def _last_requested_real_target(self) -> float | None:
+        requests = self._pending_setting_requests.get(
+            TrackableSetting.TEMPERATURE, []
+        )
+        return requests[-1][0] if requests else None
+
+    @_last_requested_real_target.setter
+    def _last_requested_real_target(self, value: float | None) -> None:
+        pass  # No-op: now derived from pending requests list
+
     def _record_real_target_request(self, real_target: float) -> None:
         """Track target values we have explicitly requested from the thermostat."""
-
-        self._last_requested_real_target = real_target
-        self._recent_real_target_requests.append((real_target, time.monotonic()))
-        if len(self._recent_real_target_requests) > MAX_TRACKED_REAL_TARGET_REQUESTS:
-            self._recent_real_target_requests.pop(0)
+        self._record_setting_request(TrackableSetting.TEMPERATURE, real_target)
 
     def _pending_request_tolerance(self) -> float:
         """Return the tolerance used when matching pending requests."""
-
         precision = self.precision or DEFAULT_PRECISION
         return max(
             PENDING_REQUEST_TOLERANCE_MIN,
@@ -1020,56 +1225,28 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     def _remove_real_target_request(self, real_target: float) -> None:
         """Remove a pending request after failures so we don't ignore real updates."""
-
-        tolerance = self._pending_request_tolerance()
-        for index, (pending, _ts) in enumerate(self._recent_real_target_requests):
-            if math.isclose(real_target, pending, abs_tol=tolerance):
-                del self._recent_real_target_requests[index]
-                break
-        if self._recent_real_target_requests:
-            self._last_requested_real_target = self._recent_real_target_requests[-1][0]
-        else:
-            self._last_requested_real_target = None
+        self._remove_pending_setting_request(
+            TrackableSetting.TEMPERATURE, real_target
+        )
 
     def _cleanup_expired_pending_requests(self) -> None:
         """Remove pending requests older than PENDING_REQUEST_TIMEOUT."""
+        self._cleanup_pending_requests(TrackableSetting.TEMPERATURE)
 
-        now = time.monotonic()
-        self._recent_real_target_requests = [
-            (target, ts)
-            for target, ts in self._recent_real_target_requests
-            if now - ts < PENDING_REQUEST_TIMEOUT
-        ]
-        if self._recent_real_target_requests:
-            self._last_requested_real_target = self._recent_real_target_requests[-1][0]
-        else:
-            self._last_requested_real_target = None
-
-    def _consume_real_target_request(self, real_target: float, tolerance: float) -> bool:
+    def _consume_real_target_request(
+        self, real_target: float, tolerance: float
+    ) -> bool:
         """Return True if a state update matches one of our pending requests."""
-
-        self._cleanup_expired_pending_requests()
-        for index, (pending, _ts) in enumerate(self._recent_real_target_requests):
-            if math.isclose(real_target, pending, abs_tol=tolerance):
-                del self._recent_real_target_requests[index]
-                if self._recent_real_target_requests:
-                    self._last_requested_real_target = (
-                        self._recent_real_target_requests[-1][0]
-                    )
-                else:
-                    self._last_requested_real_target = None
-                return True
-        return False
+        return self._consume_pending_setting_request(
+            TrackableSetting.TEMPERATURE, real_target, tolerance
+        )
 
     def _has_pending_real_target_request(
         self, real_target: float, tolerance: float
     ) -> bool:
         """Return True if we've already asked the thermostat for this target."""
-
-        self._cleanup_expired_pending_requests()
-        return any(
-            math.isclose(real_target, pending, abs_tol=tolerance)
-            for pending, _ts in self._recent_real_target_requests
+        return self._has_pending_setting_request(
+            TrackableSetting.TEMPERATURE, real_target, tolerance
         )
 
     def _discover_temperature_unit(self) -> str:
@@ -1147,6 +1324,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         self._virtual_target_temperature = new_target
         return new_target
+
+    # --- Backward-compat boolean properties for SSOT / Ignore-Thermostat ---
+
+    @property
+    def _single_source_of_truth(self) -> bool:
+        """True if any settings are SSOT-tracked."""
+        return bool(self._ssot_settings)
+
+    @property
+    def _ignore_thermostat(self) -> bool:
+        """True if any settings are in ignore-thermostat mode."""
+        return bool(self._it_settings)
 
     @property
     def temperature_unit(self) -> str:
@@ -1362,6 +1551,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if self._single_source_of_truth:
             self._ssot_hvac_mode = hvac_mode
+        # Always record for echo detection.
+        self._record_setting_request(TrackableSetting.HVAC_MODE, hvac_mode)
         self._last_real_write_time = time.monotonic()
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
@@ -1382,6 +1573,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         if self._single_source_of_truth:
             self._ssot_fan_mode = fan_mode
+        self._record_setting_request(TrackableSetting.FAN_MODE, fan_mode)
         self._last_real_write_time = time.monotonic()
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
@@ -1402,6 +1594,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         if self._single_source_of_truth:
             self._ssot_swing_mode = swing_mode
+        self._record_setting_request(TrackableSetting.SWING_MODE, swing_mode)
         self._last_real_write_time = time.monotonic()
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
@@ -1797,6 +1990,19 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             base_features |= ClimateEntityFeature.SWING_MODE
 
         self._attr_supported_features = base_features
+
+        # Populate active tracked settings based on device capabilities.
+        active = set(_CORE_TRACKED_SETTINGS)
+        if supported & ClimateEntityFeature.FAN_MODE:
+            active.add(TrackableSetting.FAN_MODE)
+        if supported & ClimateEntityFeature.SWING_MODE:
+            active.add(TrackableSetting.SWING_MODE)
+        if supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
+            active.add(TrackableSetting.TARGET_TEMP_HIGH)
+            active.add(TrackableSetting.TARGET_TEMP_LOW)
+        if supported & ClimateEntityFeature.TARGET_HUMIDITY:
+            active.add(TrackableSetting.TARGET_HUMIDITY)
+        self._active_tracked_settings = active
 
     def _update_sensor_health_from_state(self, entity_id: str | None, state: State | None) -> None:
         if not entity_id:

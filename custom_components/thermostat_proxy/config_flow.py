@@ -7,6 +7,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.components.climate.const import ClimateEntityFeature
 from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv, selector
@@ -15,10 +16,13 @@ from homeassistant.util import slugify
 from .const import (
     CONF_DEFAULT_SENSOR,
     CONF_IGNORE_THERMOSTAT,
+    CONF_IT_SETTINGS,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_SENSOR_ENTITY_ID,
     CONF_SENSOR_NAME,
     CONF_SENSORS,
+    CONF_SINGLE_SOURCE_OF_TRUTH,
+    CONF_SSOT_SETTINGS,
     DEFAULT_SENSOR_LAST_ACTIVE,
     CONF_THERMOSTAT,
     CONF_UNIQUE_ID,
@@ -30,7 +34,6 @@ from .const import (
     DEFAULT_COOLDOWN_PERIOD,
     CONF_MIN_TEMP,
     CONF_MAX_TEMP,
-    CONF_SINGLE_SOURCE_OF_TRUTH,
 )
 
 SENSOR_STEP = "sensors"
@@ -48,6 +51,69 @@ ACTION_LABELS = {
 }
 
 
+def _build_available_settings(
+    hass, thermostat_entity_id: str | None
+) -> list[selector.SelectOptionDict]:
+    """Probe device capabilities and return trackable setting options."""
+    options: list[selector.SelectOptionDict] = [
+        selector.SelectOptionDict(value="hvac_mode", label="HVAC mode"),
+        selector.SelectOptionDict(value="temperature", label="Temperature"),
+    ]
+    if not thermostat_entity_id:
+        return options
+
+    state = hass.states.get(thermostat_entity_id)
+    supported = state.attributes.get("supported_features", 0) if state else 0
+
+    if supported & ClimateEntityFeature.FAN_MODE:
+        options.append(
+            selector.SelectOptionDict(value="fan_mode", label="Fan mode")
+        )
+    if supported & ClimateEntityFeature.SWING_MODE:
+        options.append(
+            selector.SelectOptionDict(value="swing_mode", label="Swing mode")
+        )
+    if supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
+        options.append(
+            selector.SelectOptionDict(
+                value="target_temp_high", label="Target temp high"
+            )
+        )
+        options.append(
+            selector.SelectOptionDict(
+                value="target_temp_low", label="Target temp low"
+            )
+        )
+    if supported & ClimateEntityFeature.TARGET_HUMIDITY:
+        options.append(
+            selector.SelectOptionDict(
+                value="target_humidity", label="Target humidity"
+            )
+        )
+    return options
+
+
+def _migrate_bool_to_settings(
+    data: dict[str, Any],
+    options: dict[str, Any],
+    bool_key: str,
+    settings_key: str,
+    all_setting_keys: list[str],
+) -> list[str]:
+    """Migrate old boolean config to per-setting list.
+
+    Returns the resolved list of setting key strings.
+    """
+    result = options.get(settings_key, data.get(settings_key))
+    if result is not None:
+        return result
+    # Old boolean → new per-setting list
+    old_bool = options.get(bool_key, data.get(bool_key, False))
+    if old_bool:
+        return list(all_setting_keys)
+    return []
+
+
 class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Thermostat Proxy."""
 
@@ -62,8 +128,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._cooldown_period: int = DEFAULT_COOLDOWN_PERIOD
         self._min_temp: float | None = None
         self._max_temp: float | None = None
-        self._single_source_of_truth: bool = False
-        self._ignore_thermostat: bool = False
+        self._ssot_settings: list[str] = []
+        self._it_settings: list[str] = []
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
@@ -129,12 +195,20 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         self._min_temp = entry.data.get(CONF_MIN_TEMP)
         self._max_temp = entry.data.get(CONF_MAX_TEMP)
-        self._single_source_of_truth = entry.data.get(
-            CONF_SINGLE_SOURCE_OF_TRUTH, False
+
+        # Migrate old booleans to per-setting lists.
+        all_keys = [o["value"] for o in _build_available_settings(
+            self.hass, entry.data.get(CONF_THERMOSTAT)
+        )]
+        self._ssot_settings = _migrate_bool_to_settings(
+            entry.data, dict(entry.options),
+            CONF_SINGLE_SOURCE_OF_TRUTH, CONF_SSOT_SETTINGS, all_keys,
         )
-        self._ignore_thermostat = entry.data.get(
-            CONF_IGNORE_THERMOSTAT, False
+        self._it_settings = _migrate_bool_to_settings(
+            entry.data, dict(entry.options),
+            CONF_IGNORE_THERMOSTAT, CONF_IT_SETTINGS, all_keys,
         )
+
         self._use_last_active_sensor = entry.data.get(
             CONF_USE_LAST_ACTIVE_SENSOR, False
         )
@@ -308,6 +382,11 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if self._use_last_active_sensor
             else self._default_sensor
         )
+
+        # Probe device capabilities for available trackable settings.
+        thermostat_id = self._data.get(CONF_THERMOSTAT)
+        available_settings = _build_available_settings(self.hass, thermostat_id)
+
         if user_input is not None:
             default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
             submitted_physical_name = user_input.get(
@@ -320,8 +399,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             cooldown_period = user_input.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD)
             min_temp = user_input.get(CONF_MIN_TEMP) or None
             max_temp = user_input.get(CONF_MAX_TEMP) or None
-            single_source_of_truth = user_input.get(CONF_SINGLE_SOURCE_OF_TRUTH, False)
-            ignore_thermostat = user_input.get(CONF_IGNORE_THERMOSTAT, False)
+            ssot_settings = user_input.get(CONF_SSOT_SETTINGS) or []
+            it_settings = user_input.get(CONF_IT_SETTINGS) or []
 
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
@@ -348,8 +427,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._cooldown_period = cooldown_period
                 self._min_temp = min_temp
                 self._max_temp = max_temp
-                self._single_source_of_truth = single_source_of_truth
-                self._ignore_thermostat = ignore_thermostat
+                self._ssot_settings = ssot_settings
+                self._it_settings = it_settings
                 self._use_last_active_sensor = use_last_active_sensor
 
                 sensor_names_with_physical = list(sensor_names)
@@ -364,8 +443,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_USE_LAST_ACTIVE_SENSOR: self._use_last_active_sensor,
                     CONF_MIN_TEMP: min_temp,
                     CONF_MAX_TEMP: max_temp,
-                    CONF_SINGLE_SOURCE_OF_TRUTH: single_source_of_truth,
-                    CONF_IGNORE_THERMOSTAT: ignore_thermostat,
+                    CONF_SSOT_SETTINGS: ssot_settings,
+                    CONF_IT_SETTINGS: it_settings,
                 }
                 if self._use_last_active_sensor:
                     data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -409,23 +488,26 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         number_selector = selector.NumberSelector(
             selector.NumberSelectorConfig(max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
         )
-        
+
         # Show current values as defaults during reconfigure (0 = disabled)
         min_temp_default = self._min_temp if self._min_temp is not None else 0
         max_temp_default = self._max_temp if self._max_temp is not None else 0
-        
+
         schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
         schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
-        schema_fields[
-            vol.Optional(
-                CONF_SINGLE_SOURCE_OF_TRUTH, default=self._single_source_of_truth
+
+        # Per-setting SSOT and Ignore-Thermostat multi-selects.
+        settings_selector = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=available_settings, multiple=True
             )
-        ] = selector.BooleanSelector()
+        )
         schema_fields[
-            vol.Optional(
-                CONF_IGNORE_THERMOSTAT, default=self._ignore_thermostat
-            )
-        ] = selector.BooleanSelector()
+            vol.Optional(CONF_SSOT_SETTINGS, default=self._ssot_settings)
+        ] = settings_selector
+        schema_fields[
+            vol.Optional(CONF_IT_SETTINGS, default=self._it_settings)
+        ] = settings_selector
 
         if sensor_names:
             default_options = [
@@ -477,6 +559,14 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             suffix += 1
         return candidate
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> CustomThermostatOptionsFlowHandler:
+        """Return the options flow handler."""
+        return CustomThermostatOptionsFlowHandler(config_entry)
+
 
 class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle Thermostat Proxy options."""
@@ -515,13 +605,20 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_MAX_TEMP,
             self.config_entry.data.get(CONF_MAX_TEMP),
         )
-        current_single_source_of_truth = self.config_entry.options.get(
-            CONF_SINGLE_SOURCE_OF_TRUTH,
-            self.config_entry.data.get(CONF_SINGLE_SOURCE_OF_TRUTH, False),
+
+        # Probe device capabilities for available trackable settings.
+        thermostat_id = self.config_entry.data.get(CONF_THERMOSTAT)
+        available_settings = _build_available_settings(self.hass, thermostat_id)
+        all_keys = [o["value"] for o in available_settings]
+
+        # Migrate old booleans to per-setting lists if needed.
+        current_ssot_settings = _migrate_bool_to_settings(
+            self.config_entry.data, dict(self.config_entry.options),
+            CONF_SINGLE_SOURCE_OF_TRUTH, CONF_SSOT_SETTINGS, all_keys,
         )
-        current_ignore_thermostat = self.config_entry.options.get(
-            CONF_IGNORE_THERMOSTAT,
-            self.config_entry.data.get(CONF_IGNORE_THERMOSTAT, False),
+        current_it_settings = _migrate_bool_to_settings(
+            self.config_entry.data, dict(self.config_entry.options),
+            CONF_IGNORE_THERMOSTAT, CONF_IT_SETTINGS, all_keys,
         )
 
         if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
@@ -533,7 +630,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
             min_temp = user_input.get(CONF_MIN_TEMP) or None
             max_temp = user_input.get(CONF_MAX_TEMP) or None
-            
+
             if default_sensor and default_sensor not in (*sensor_names, DEFAULT_SENSOR_LAST_ACTIVE):
                 errors["base"] = "invalid_default_sensor"
             elif min_temp is not None and max_temp is not None and min_temp >= max_temp:
@@ -547,12 +644,12 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                     if default_sensor:
                         data[CONF_DEFAULT_SENSOR] = default_sensor
                     data[CONF_USE_LAST_ACTIVE_SENSOR] = False
-                
+
                 data[CONF_COOLDOWN_PERIOD] = user_input.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD)
                 data[CONF_MIN_TEMP] = min_temp
                 data[CONF_MAX_TEMP] = max_temp
-                data[CONF_SINGLE_SOURCE_OF_TRUTH] = user_input.get(CONF_SINGLE_SOURCE_OF_TRUTH, False)
-                data[CONF_IGNORE_THERMOSTAT] = user_input.get(CONF_IGNORE_THERMOSTAT, False)
+                data[CONF_SSOT_SETTINGS] = user_input.get(CONF_SSOT_SETTINGS) or []
+                data[CONF_IT_SETTINGS] = user_input.get(CONF_IT_SETTINGS) or []
 
                 return self.async_create_entry(title="", data=data)
 
@@ -591,25 +688,26 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
         number_selector = selector.NumberSelector(
             selector.NumberSelectorConfig(max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
         )
-        
+
         # Show current values as defaults in options (0 = disabled)
         min_temp_default = current_min_temp if current_min_temp is not None else 0
         max_temp_default = current_max_temp if current_max_temp is not None else 0
-        
+
         schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
         schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
-        schema_fields[
-            vol.Optional(
-                CONF_SINGLE_SOURCE_OF_TRUTH,
-                default=current_single_source_of_truth,
+
+        # Per-setting SSOT and Ignore-Thermostat multi-selects.
+        settings_selector = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=available_settings, multiple=True
             )
-        ] = selector.BooleanSelector()
+        )
         schema_fields[
-            vol.Optional(
-                CONF_IGNORE_THERMOSTAT,
-                default=current_ignore_thermostat,
-            )
-        ] = selector.BooleanSelector()
+            vol.Optional(CONF_SSOT_SETTINGS, default=current_ssot_settings)
+        ] = settings_selector
+        schema_fields[
+            vol.Optional(CONF_IT_SETTINGS, default=current_it_settings)
+        ] = settings_selector
 
         data_schema = vol.Schema(schema_fields)
 
@@ -618,10 +716,3 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             data_schema=data_schema,
             errors=errors,
         )
-
-
-@callback
-def async_get_options_flow(config_entry: config_entries.ConfigEntry):
-    """Return the options flow handler."""
-
-    return CustomThermostatOptionsFlowHandler(config_entry)
