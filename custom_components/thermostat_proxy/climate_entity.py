@@ -773,7 +773,29 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def target_temperature(self) -> float | None:
+        if self._is_range_mode_active() and self._range_targets_available():
+            return None
+        if self._virtual_target_temperature is None:
+            self._virtual_target_temperature = self._apply_target_constraints(
+                self._last_real_target_temp
+                or self._get_real_target_temperature()
+                or self._get_active_sensor_temperature()
+                or self._get_real_current_temperature()
+            )
         return self._virtual_target_temperature
+
+    def _is_range_mode_active(self) -> bool:
+        if not self._real_state:
+            return False
+        supported = self._real_state.attributes.get("supported_features", 0)
+        if not (supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE):
+            return False
+        return self.hvac_mode == HVACMode.HEAT_COOL
+
+    def _range_targets_available(self) -> bool:
+        high = self._get_it_or_real(TrackableSetting.TARGET_TEMP_HIGH)
+        low = self._get_it_or_real(TrackableSetting.TARGET_TEMP_LOW)
+        return high is not None and low is not None
 
     def _get_it_or_real(self, setting: TrackableSetting) -> Any:
         """Return IT baseline if locked, otherwise read from the real device."""
@@ -788,12 +810,22 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     @property
     def target_temperature_high(self) -> float | None:
         """Return the high target temperature for range mode."""
-        return self._get_it_or_real(TrackableSetting.TARGET_TEMP_HIGH)
+        if not self._is_range_mode_active():
+            return None
+        value = self._get_it_or_real(TrackableSetting.TARGET_TEMP_HIGH)
+        if value is None:
+            return self._virtual_target_temperature
+        return value
 
     @property
     def target_temperature_low(self) -> float | None:
         """Return the low target temperature for range mode."""
-        return self._get_it_or_real(TrackableSetting.TARGET_TEMP_LOW)
+        if not self._is_range_mode_active():
+            return None
+        value = self._get_it_or_real(TrackableSetting.TARGET_TEMP_LOW)
+        if value is None:
+            return self._virtual_target_temperature
+        return value
 
     @property
     def target_humidity(self) -> float | None:
@@ -1036,7 +1068,17 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             req_high = _coerce_temperature(raw_high)
             req_low = _coerce_temperature(raw_low)
 
-            if req_high is not None and req_low is not None:
+            if req_high is not None or req_low is not None:
+                if req_high is None:
+                    req_high = _coerce_temperature(self.target_temperature_high)
+                if req_low is None:
+                    req_low = _coerce_temperature(self.target_temperature_low)
+                if req_high is None or req_low is None:
+                    _LOGGER.warning(
+                        "Set temperature range called without complete high/low values for %s",
+                        self.entity_id,
+                    )
+                    return
                 result_high = self._compute_delta_target(req_high)
                 result_low = self._compute_delta_target(req_low)
                 if result_high is None or result_low is None:

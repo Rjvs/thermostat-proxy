@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from homeassistant.components.climate.const import HVACMode
+from homeassistant.components.climate.const import ClimateEntityFeature, HVACMode
 from homeassistant.const import ATTR_ENTITY_ID, ATTR_TEMPERATURE
 from homeassistant.core import HomeAssistant, ServiceRegistry, State
 
@@ -159,6 +159,46 @@ class TestSetTemperature:
             await entity.async_set_temperature(temperature=25.0)
 
         assert entity._virtual_target_temperature == 25.0
+
+    async def test_set_temperature_range_accepts_partial_update(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        """When one bound is omitted, existing proxy value should fill it."""
+        ent = make_entity()
+        real_state = make_thermostat_state(
+            state=HVACMode.HEAT_COOL,
+            hvac_mode=HVACMode.HEAT_COOL,
+            supported_features=(
+                DEFAULT_THERMOSTAT_ATTRS["supported_features"]
+                | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+            ),
+            target_temp_high=25.0,
+            target_temp_low=18.0,
+        )
+        hass.states.async_set(
+            REAL_THERMOSTAT_ENTITY,
+            real_state.state,
+            real_state.attributes,
+        )
+        ent._real_state = hass.states.get(REAL_THERMOSTAT_ENTITY)
+
+        sensor_state = make_sensor_state()
+        hass.states.async_set(
+            SENSOR_ENTITY, sensor_state.state, sensor_state.attributes,
+        )
+        ent._sensor_states[SENSOR_ENTITY] = hass.states.get(SENSOR_ENTITY)
+        ent._virtual_target_temperature = 24.0
+        ent._last_real_target_temp = 22.0
+        ent._target_temp_step = 0.5
+        ent._async_log_real_adjustment = AsyncMock()
+        ent.async_write_ha_state = lambda: None
+
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock) as mock_call:
+            await ent.async_set_temperature(target_temp_high=26.0)
+            args = mock_call.call_args[0]
+            data = next(a for a in args if isinstance(a, dict))
+            assert "target_temp_high" in data
+            assert "target_temp_low" in data
 
 
 # ── async_set_hvac_mode ──────────────────────────────────────────────

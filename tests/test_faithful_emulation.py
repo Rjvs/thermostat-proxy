@@ -76,8 +76,9 @@ FULL_THERMOSTAT_ATTRS: dict[str, Any] = {
 
 def _make_full_state(**overrides: Any) -> State:
     """Create a full-featured thermostat State."""
+    state = overrides.pop("state", HVACMode.HEAT)
     attrs = {**FULL_THERMOSTAT_ATTRS, **overrides}
-    return State(REAL_THERMOSTAT_ENTITY, str(HVACMode.HEAT), attrs)
+    return State(REAL_THERMOSTAT_ENTITY, str(state), attrs)
 
 
 def _seed_entity(
@@ -216,15 +217,38 @@ class TestPropertyForwarding:
         self, hass: HomeAssistant, make_entity
     ) -> None:
         ent = make_entity()
-        _seed_entity(hass, ent)
+        _seed_entity(
+            hass, ent,
+            _make_full_state(state=HVACMode.HEAT_COOL, hvac_mode=HVACMode.HEAT_COOL),
+        )
         assert ent.target_temperature_high == 25.0
 
     def test_target_temperature_low(
         self, hass: HomeAssistant, make_entity
     ) -> None:
         ent = make_entity()
-        _seed_entity(hass, ent)
+        _seed_entity(
+            hass, ent,
+            _make_full_state(state=HVACMode.HEAT_COOL, hvac_mode=HVACMode.HEAT_COOL),
+        )
         assert ent.target_temperature_low == 18.0
+
+    def test_target_temperature_recovers_when_virtual_missing(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        ent = make_entity()
+        _seed_entity(hass, ent)
+        ent._virtual_target_temperature = None
+        ent._last_real_target_temp = 27.0
+        assert ent.target_temperature == 27.0
+
+    def test_target_temperature_high_low_none_outside_range_mode(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        ent = make_entity()
+        _seed_entity(hass, ent, _make_full_state(hvac_mode=HVACMode.HEAT))
+        assert ent.target_temperature_high is None
+        assert ent.target_temperature_low is None
 
     def test_swing_horizontal_mode(
         self, hass: HomeAssistant, make_entity
@@ -385,6 +409,12 @@ class TestITOverrideParametrized:
     ) -> None:
         ent = make_entity(it_settings=[it_key])
         ent._ssot_baselines[setting] = baseline
+        if it_key in {"target_temp_high", "target_temp_low"}:
+            state_kwargs = {
+                **state_kwargs,
+                "state": HVACMode.HEAT_COOL,
+                "hvac_mode": HVACMode.HEAT_COOL,
+            }
         _seed_entity(hass, ent, _make_full_state(**state_kwargs))
         assert getattr(ent, prop_name) == baseline
 
@@ -399,6 +429,12 @@ class TestITOverrideParametrized:
     ) -> None:
         ent = make_entity()
         ent._ssot_baselines[setting] = baseline
+        if it_key in {"target_temp_high", "target_temp_low"}:
+            state_kwargs = {
+                **state_kwargs,
+                "state": HVACMode.HEAT_COOL,
+                "hvac_mode": HVACMode.HEAT_COOL,
+            }
         _seed_entity(hass, ent, _make_full_state(**state_kwargs))
         assert getattr(ent, prop_name) == expected_real
 
@@ -455,8 +491,8 @@ class TestHolisticMirroring:
 
         # Temperature
         assert ent.target_temperature == 24.0  # virtual target
-        assert ent.target_temperature_high == 25.0
-        assert ent.target_temperature_low == 18.0
+        assert ent.target_temperature_high is None
+        assert ent.target_temperature_low is None
         assert ent.target_temperature_step == 0.5
         assert ent.min_temp == 5.0
         assert ent.max_temp == 35.0
