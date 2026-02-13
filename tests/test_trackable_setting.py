@@ -49,6 +49,16 @@ class TestReadFrom:
         state = _make_state("heat", temperature=None)
         assert TrackableSetting.TEMPERATURE.read_from(state) is None
 
+    def test_target_humidity_reads_from_humidity_attribute(self) -> None:
+        """TARGET_HUMIDITY reads from 'humidity' attr (HA convention), not 'target_humidity'."""
+        state = _make_state("heat", humidity=45)
+        assert TrackableSetting.TARGET_HUMIDITY.read_from(state) == 45.0
+
+    def test_target_humidity_state_attr_differs_from_attr_key(self) -> None:
+        """TARGET_HUMIDITY.state_attr is 'humidity' while attr_key is 'target_humidity'."""
+        assert TrackableSetting.TARGET_HUMIDITY.attr_key == "target_humidity"
+        assert TrackableSetting.TARGET_HUMIDITY.state_attr == "humidity"
+
 
 # ── values_match ──────────────────────────────────────────────────────
 
