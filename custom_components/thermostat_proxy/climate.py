@@ -64,6 +64,7 @@ from .const import (
     ATTR_SELECTED_SENSOR_OPTIONS,
     ATTR_SSOT_FAN_MODE,
     ATTR_SSOT_HVAC_MODE,
+    ATTR_SSOT_SWING_HORIZONTAL_MODE,
     ATTR_SSOT_SWING_MODE,
     ATTR_UNAVAILABLE_ENTITIES,
     CONF_IGNORE_THERMOSTAT,
@@ -110,6 +111,7 @@ _RESERVED_REAL_ATTRIBUTES = {
     "current_temperature",
     "hvac_modes",
     "hvac_mode",
+    "hvac_action",
     "preset_modes",
     "preset_mode",
     "target_temp_step",
@@ -118,9 +120,15 @@ _RESERVED_REAL_ATTRIBUTES = {
     "fan_modes",
     "swing_mode",
     "swing_modes",
+    "swing_horizontal_mode",
+    "swing_horizontal_modes",
     "current_humidity",
+    "humidity",
+    "min_humidity",
+    "max_humidity",
     "min_temp",
     "max_temp",
+    "precision",
 }
 
 # Single Source of Truth: user-controllable temperature attributes.
@@ -137,6 +145,7 @@ _SSOT_TEMPERATURE_ATTRIBUTES = frozenset({
 _SSOT_ENUM_ATTRIBUTES = frozenset({
     "fan_mode",
     "swing_mode",
+    "swing_horizontal_mode",
 })
 
 
@@ -156,6 +165,7 @@ class TrackableSetting(Enum):
     TARGET_TEMP_HIGH = ("target_temp_high", False, True)
     TARGET_TEMP_LOW = ("target_temp_low", False, True)
     TARGET_HUMIDITY = ("target_humidity", False, True)
+    SWING_HORIZONTAL_MODE = ("swing_horizontal_mode", False, False)
 
     def __init__(
         self, attr_key: str, is_state: bool, is_numeric: bool
@@ -473,6 +483,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._ssot_hvac_mode: str | None = None
         self._ssot_fan_mode: str | None = None
         self._ssot_swing_mode: str | None = None
+        self._ssot_swing_horizontal_mode: str | None = None
         # Active tracked settings — populated in _update_real_temperature_limits
         # based on device capabilities.  Start with core set.
         self._active_tracked_settings: set[TrackableSetting] = set(
@@ -515,6 +526,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
                 self._ssot_swing_mode = self._real_state.attributes.get(
                     "swing_mode"
+                )
+                self._ssot_swing_horizontal_mode = self._real_state.attributes.get(
+                    "swing_horizontal_mode"
                 )
                 if self._last_real_target_temp is None:
                     self._last_real_target_temp = _coerce_temperature(
@@ -596,6 +610,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._ssot_fan_mode = new_state.attributes.get("fan_mode")
                 self._ssot_swing_mode = new_state.attributes.get(
                     "swing_mode"
+                )
+                self._ssot_swing_horizontal_mode = new_state.attributes.get(
+                    "swing_horizontal_mode"
                 )
                 if self._last_real_target_temp is None:
                     seed_target = _coerce_temperature(
@@ -878,6 +895,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         known_enums: dict[str, str | None] = {
             "fan_mode": self._ssot_fan_mode,
             "swing_mode": self._ssot_swing_mode,
+            "swing_horizontal_mode": self._ssot_swing_horizontal_mode,
         }
         for attr in _SSOT_ENUM_ATTRIBUTES:
             known_good = known_enums.get(attr)
@@ -1057,6 +1075,41 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         err,
                     )
 
+        # Correct swing horizontal mode
+        if self._ssot_swing_horizontal_mode is not None:
+            current_swing_h = device_state.attributes.get("swing_horizontal_mode")
+            if (
+                current_swing_h is not None
+                and current_swing_h != self._ssot_swing_horizontal_mode
+            ):
+                from homeassistant.components.climate.const import (
+                    ATTR_SWING_HORIZONTAL_MODE,
+                    SERVICE_SET_SWING_HORIZONTAL_MODE,
+                )
+
+                corrections.append(f"swing_horizontal_mode={self._ssot_swing_horizontal_mode}")
+                self._record_setting_request(
+                    TrackableSetting.SWING_HORIZONTAL_MODE, self._ssot_swing_horizontal_mode
+                )
+                self._last_real_write_time = time.monotonic()
+                try:
+                    await self.hass.services.async_call(
+                        CLIMATE_DOMAIN,
+                        SERVICE_SET_SWING_HORIZONTAL_MODE,
+                        {
+                            ATTR_ENTITY_ID: self._real_entity_id,
+                            ATTR_SWING_HORIZONTAL_MODE: self._ssot_swing_horizontal_mode,
+                        },
+                        blocking=True,
+                    )
+                except Exception as err:
+                    _LOGGER.error(
+                        "Single source of truth: failed to correct swing "
+                        "horizontal mode on %s: %s",
+                        self._real_entity_id,
+                        err,
+                    )
+
         if corrections:
             await self.hass.services.async_call(
                 LOGBOOK_DOMAIN,
@@ -1153,6 +1206,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return self._ssot_fan_mode
         if setting == TrackableSetting.SWING_MODE:
             return self._ssot_swing_mode
+        if setting == TrackableSetting.SWING_HORIZONTAL_MODE:
+            return self._ssot_swing_horizontal_mode
         return None  # Future settings not yet baselined
 
     def _set_ssot_baseline(
@@ -1167,6 +1222,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._ssot_fan_mode = value
         elif setting == TrackableSetting.SWING_MODE:
             self._ssot_swing_mode = value
+        elif setting == TrackableSetting.SWING_HORIZONTAL_MODE:
+            self._ssot_swing_horizontal_mode = value
 
     # ---- Deterministic echo detection ----
 
@@ -1414,6 +1471,30 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return None
 
     @property
+    def min_humidity(self) -> float:
+        """Return the minimum humidity, forwarded from the real device."""
+        if self._real_state:
+            val = self._real_state.attributes.get("min_humidity")
+            if val is not None:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    pass
+        return super().min_humidity
+
+    @property
+    def max_humidity(self) -> float:
+        """Return the maximum humidity, forwarded from the real device."""
+        if self._real_state:
+            val = self._real_state.attributes.get("max_humidity")
+            if val is not None:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    pass
+        return super().max_humidity
+
+    @property
     def hvac_mode(self) -> HVACMode | None:
         if TrackableSetting.HVAC_MODE in self._it_settings and self._ssot_hvac_mode is not None:
             try:
@@ -1507,11 +1588,84 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             attrs[ATTR_SSOT_HVAC_MODE] = self._ssot_hvac_mode
             attrs[ATTR_SSOT_FAN_MODE] = self._ssot_fan_mode
             attrs[ATTR_SSOT_SWING_MODE] = self._ssot_swing_mode
+            attrs[ATTR_SSOT_SWING_HORIZONTAL_MODE] = self._ssot_swing_horizontal_mode
             attrs[ATTR_IGNORE_THERMOSTAT] = self._ignore_thermostat
         return attrs
 
+    def _compute_delta_target(self, requested: float) -> tuple[float, float, float, float] | None:
+        """Compute the real target from a virtual requested temperature.
+
+        Returns (constrained_virtual, real_target, display_current, real_current)
+        or None if the computation cannot be performed.
+        """
+        constrained = self._apply_target_constraints(requested)
+        if requested != constrained:
+            _LOGGER.info(
+                "%s target adjusted from %s to %s to honor thermostat limits",
+                self.entity_id,
+                requested,
+                constrained,
+            )
+
+        display_current = self.current_temperature
+        real_current = self._get_real_current_temperature()
+        if display_current is None or real_current is None:
+            _LOGGER.warning(
+                "Cannot compute temperature delta for %s because sensor or thermostat is missing",
+                self.entity_id,
+            )
+            return None
+
+        delta = constrained - display_current
+        calculated = real_current + delta
+        clamped = self._apply_safety_clamp(calculated)
+        if clamped is None:
+            _LOGGER.warning(
+                "Cannot set temperature for %s: safety clamp returned None",
+                self.entity_id,
+            )
+            return None
+        real_target = self._apply_target_constraints(clamped)
+        return (constrained, real_target, display_current, real_current)
+
     async def async_set_temperature(self, **kwargs: Any) -> None:
         async with self._command_lock:
+            # --- Range mode (target_temp_high / target_temp_low) ---
+            raw_high = kwargs.get("target_temp_high")
+            raw_low = kwargs.get("target_temp_low")
+            req_high = _coerce_temperature(raw_high)
+            req_low = _coerce_temperature(raw_low)
+
+            if req_high is not None and req_low is not None:
+                result_high = self._compute_delta_target(req_high)
+                result_low = self._compute_delta_target(req_low)
+                if result_high is None or result_low is None:
+                    return
+
+                _, real_high, _, _ = result_high
+                _, real_low, _, _ = result_low
+
+                payload: dict[str, Any] = {
+                    ATTR_ENTITY_ID: self._real_entity_id,
+                    "target_temp_high": real_high,
+                    "target_temp_low": real_low,
+                }
+                if ATTR_HVAC_MODE in kwargs and kwargs[ATTR_HVAC_MODE] is not None:
+                    payload[ATTR_HVAC_MODE] = kwargs[ATTR_HVAC_MODE]
+
+                self._record_setting_request(TrackableSetting.TARGET_TEMP_HIGH, real_high)
+                self._record_setting_request(TrackableSetting.TARGET_TEMP_LOW, real_low)
+                self._last_real_write_time = time.monotonic()
+                await self.hass.services.async_call(
+                    CLIMATE_DOMAIN,
+                    SERVICE_SET_TEMPERATURE,
+                    payload,
+                    blocking=True,
+                )
+                self.async_write_ha_state()
+                return
+
+            # --- Single target mode ---
             temperature = kwargs.get(ATTR_TEMPERATURE)
             requested = _coerce_temperature(temperature)
             if requested is None:
@@ -1522,34 +1676,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
                 return
 
-            constrained_target = self._apply_target_constraints(requested)
-            if requested != constrained_target:
-                _LOGGER.info(
-                    "%s target adjusted from %s to %s to honor thermostat limits",
-                    self.entity_id,
-                    requested,
-                    constrained_target,
-                )
-
-            display_current = self.current_temperature
-            real_current = self._get_real_current_temperature()
-            if display_current is None or real_current is None:
-                _LOGGER.warning(
-                    "Cannot compute temperature delta for %s because sensor or thermostat is missing",
-                    self.entity_id,
-                )
+            result = self._compute_delta_target(requested)
+            if result is None:
                 return
+            constrained_target, real_target, display_current, real_current = result
 
-            delta = constrained_target - display_current
-            calculated_real_target = real_current + delta
-            real_target = self._apply_safety_clamp(calculated_real_target)
-            if real_target is None:
-                _LOGGER.warning(
-                    "Cannot set temperature for %s: safety clamp returned None",
-                    self.entity_id,
-                )
-                return
-            real_target = self._apply_target_constraints(real_target)
             payload = {
                 ATTR_ENTITY_ID: self._real_entity_id,
                 ATTR_TEMPERATURE: real_target,
@@ -1574,11 +1705,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_write_time,
                     self._suppress_sync_logs_until,
                 )
-                
+
                 self._last_real_target_temp = real_target
                 self._last_real_write_time = time.monotonic()
                 self._start_auto_sync_log_suppression()
-                
+
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
                     SERVICE_SET_TEMPERATURE,
@@ -1653,6 +1784,65 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 ATTR_ENTITY_ID: self._real_entity_id,
                 ATTR_SWING_MODE: swing_mode,
             },
+            blocking=True,
+        )
+
+    async def async_set_humidity(self, humidity: int) -> None:
+        """Set new target humidity, forwarded to the physical thermostat."""
+        from homeassistant.components.climate.const import (
+            SERVICE_SET_HUMIDITY,
+        )
+
+        self._record_setting_request(TrackableSetting.TARGET_HUMIDITY, float(humidity))
+        self._last_real_write_time = time.monotonic()
+        await self.hass.services.async_call(
+            CLIMATE_DOMAIN,
+            SERVICE_SET_HUMIDITY,
+            {
+                ATTR_ENTITY_ID: self._real_entity_id,
+                "humidity": humidity,
+            },
+            blocking=True,
+        )
+
+    async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
+        """Set new horizontal swing mode, forwarded to the physical thermostat."""
+        from homeassistant.components.climate.const import (
+            ATTR_SWING_HORIZONTAL_MODE,
+            SERVICE_SET_SWING_HORIZONTAL_MODE,
+        )
+
+        if self._single_source_of_truth:
+            self._ssot_swing_horizontal_mode = swing_horizontal_mode
+        self._record_setting_request(TrackableSetting.SWING_HORIZONTAL_MODE, swing_horizontal_mode)
+        self._last_real_write_time = time.monotonic()
+        await self.hass.services.async_call(
+            CLIMATE_DOMAIN,
+            SERVICE_SET_SWING_HORIZONTAL_MODE,
+            {
+                ATTR_ENTITY_ID: self._real_entity_id,
+                ATTR_SWING_HORIZONTAL_MODE: swing_horizontal_mode,
+            },
+            blocking=True,
+        )
+
+    async def async_turn_on(self) -> None:
+        """Turn the entity on, forwarded to the physical thermostat."""
+        self._last_real_write_time = time.monotonic()
+        await self.hass.services.async_call(
+            CLIMATE_DOMAIN,
+            "turn_on",
+            {ATTR_ENTITY_ID: self._real_entity_id},
+            blocking=True,
+        )
+
+    async def async_turn_off(self) -> None:
+        """Turn the entity off, forwarded to the physical thermostat."""
+        self._last_real_write_time = time.monotonic()
+        await self.hass.services.async_call(
+            CLIMATE_DOMAIN,
+            "turn_off",
+            {ATTR_ENTITY_ID: self._real_entity_id},
             blocking=True,
         )
 
@@ -2001,6 +2191,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             restored_ssot_swing = last_state.attributes.get(ATTR_SSOT_SWING_MODE)
             if restored_ssot_swing is not None:
                 self._ssot_swing_mode = restored_ssot_swing
+            restored_ssot_swing_h = last_state.attributes.get(ATTR_SSOT_SWING_HORIZONTAL_MODE)
+            if restored_ssot_swing_h is not None:
+                self._ssot_swing_horizontal_mode = restored_ssot_swing_h
 
     def _update_real_temperature_limits(self) -> None:
         if not self._real_state:
@@ -2042,6 +2235,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             base_features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
         if supported & ClimateEntityFeature.TARGET_HUMIDITY:
             base_features |= ClimateEntityFeature.TARGET_HUMIDITY
+        if supported & ClimateEntityFeature.SWING_HORIZONTAL_MODE:
+            base_features |= ClimateEntityFeature.SWING_HORIZONTAL_MODE
+        if supported & ClimateEntityFeature.TURN_ON:
+            base_features |= ClimateEntityFeature.TURN_ON
+        if supported & ClimateEntityFeature.TURN_OFF:
+            base_features |= ClimateEntityFeature.TURN_OFF
 
         self._attr_supported_features = base_features
 
@@ -2051,6 +2250,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             active.add(TrackableSetting.FAN_MODE)
         if supported & ClimateEntityFeature.SWING_MODE:
             active.add(TrackableSetting.SWING_MODE)
+        if supported & ClimateEntityFeature.SWING_HORIZONTAL_MODE:
+            active.add(TrackableSetting.SWING_HORIZONTAL_MODE)
         if supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
             active.add(TrackableSetting.TARGET_TEMP_HIGH)
             active.add(TrackableSetting.TARGET_TEMP_LOW)
@@ -2384,6 +2585,22 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Return the list of available swing modes."""
         if self._real_state:
             return self._real_state.attributes.get("swing_modes")
+        return None
+
+    @property
+    def swing_horizontal_mode(self) -> str | None:
+        """Return the horizontal swing setting."""
+        if TrackableSetting.SWING_HORIZONTAL_MODE in self._it_settings and self._ssot_swing_horizontal_mode is not None:
+            return self._ssot_swing_horizontal_mode
+        if self._real_state:
+            return self._real_state.attributes.get("swing_horizontal_mode")
+        return None
+
+    @property
+    def swing_horizontal_modes(self) -> list[str] | None:
+        """Return the list of available horizontal swing modes."""
+        if self._real_state:
+            return self._real_state.attributes.get("swing_horizontal_modes")
         return None
 
     @property

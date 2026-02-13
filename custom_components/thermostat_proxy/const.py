@@ -37,6 +37,7 @@ ATTR_UNAVAILABLE_ENTITIES = "unavailable_entities"
 ATTR_SSOT_HVAC_MODE = "ssot_hvac_mode"
 ATTR_SSOT_FAN_MODE = "ssot_fan_mode"
 ATTR_SSOT_SWING_MODE = "ssot_swing_mode"
+ATTR_SSOT_SWING_HORIZONTAL_MODE = "ssot_swing_horizontal_mode"
 ATTR_IGNORE_THERMOSTAT = "ignore_thermostat"
 
 OVERDRIVE_ADJUSTMENT_HEAT = 1.0

@@ -186,6 +186,42 @@ class TestSetHvacMode:
                 for a in call_args[0]
             )
 
+    @pytest.mark.parametrize(
+        "from_mode,to_mode",
+        [
+            (HVACMode.COOL, HVACMode.OFF),
+            (HVACMode.OFF, HVACMode.COOL),
+            (HVACMode.HEAT, HVACMode.OFF),
+            (HVACMode.OFF, HVACMode.HEAT),
+        ],
+    )
+    async def test_set_hvac_mode_forwards_to_real_device(
+        self, hass: HomeAssistant, make_entity, from_mode: HVACMode, to_mode: HVACMode
+    ) -> None:
+        """Setting HVAC mode calls climate.set_hvac_mode on the physical entity."""
+        ent = make_entity()
+        real_state = make_thermostat_state(state=from_mode)
+        hass.states.async_set(
+            REAL_THERMOSTAT_ENTITY, real_state.state, real_state.attributes,
+        )
+        ent._real_state = hass.states.get(REAL_THERMOSTAT_ENTITY)
+
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock) as mock_call:
+            await ent.async_set_hvac_mode(to_mode)
+
+            mock_call.assert_called_once()
+            # async_call is patched at class level, so positional args are:
+            # (self, domain, service, data, ...)
+            args = mock_call.call_args[0]
+            # Find domain and service (strings that aren't 'self')
+            str_args = [a for a in args if isinstance(a, str)]
+            assert "climate" in str_args
+            assert "set_hvac_mode" in str_args
+            # Find the data dict
+            data = next(a for a in args if isinstance(a, dict))
+            assert data[ATTR_ENTITY_ID] == REAL_THERMOSTAT_ENTITY
+            assert data["hvac_mode"] == to_mode
+
     async def test_set_hvac_mode_records_pending(
         self, hass: HomeAssistant, entity
     ) -> None:
