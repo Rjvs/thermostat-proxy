@@ -7,33 +7,18 @@ via make_entity and directly calling the internal methods.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from homeassistant.components.climate.const import HVACMode
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import HomeAssistant
 
 from custom_components.thermostat_proxy.climate import (
     TrackableSetting,
 )
 
-from .conftest import REAL_THERMOSTAT_ENTITY
-
-
-def _state(
-    hvac: str = "heat",
-    temperature: float = 22.0,
-    fan_mode: str | None = "auto",
-    swing_mode: str | None = "off",
-    **extra,
-) -> State:
-    attrs: dict = {"temperature": temperature, **extra}
-    if fan_mode is not None:
-        attrs["fan_mode"] = fan_mode
-    if swing_mode is not None:
-        attrs["swing_mode"] = swing_mode
-    return State(REAL_THERMOSTAT_ENTITY, hvac, attrs)
+from .conftest import make_simple_state as _state, seed_core_baselines
 
 
 # ── Baseline seeding ──────────────────────────────────────────────────
@@ -53,20 +38,20 @@ class TestBaselineSeeding:
             TrackableSetting.SWING_MODE,
         }
         # Baselines start as None
-        assert entity._ssot_hvac_mode is None
+        assert entity._ssot_baselines.get(TrackableSetting.HVAC_MODE) is None
 
         # Simulate what the event handler does on first valid event:
         # it checks _ssot_hvac_mode is None and seeds.
         new = _state(hvac="cool", temperature=23.0, fan_mode="high", swing_mode="on")
         # Manually exercise the seeding path:
-        entity._ssot_hvac_mode = new.state
-        entity._ssot_fan_mode = new.attributes.get("fan_mode")
-        entity._ssot_swing_mode = new.attributes.get("swing_mode")
+        entity._ssot_baselines[TrackableSetting.HVAC_MODE] = new.state
+        entity._ssot_baselines[TrackableSetting.FAN_MODE] = new.attributes.get("fan_mode")
+        entity._ssot_baselines[TrackableSetting.SWING_MODE] = new.attributes.get("swing_mode")
         entity._last_real_target_temp = 23.0
 
-        assert entity._ssot_hvac_mode == "cool"
-        assert entity._ssot_fan_mode == "high"
-        assert entity._ssot_swing_mode == "on"
+        assert entity._ssot_baselines.get(TrackableSetting.HVAC_MODE) == "cool"
+        assert entity._ssot_baselines.get(TrackableSetting.FAN_MODE) == "high"
+        assert entity._ssot_baselines.get(TrackableSetting.SWING_MODE) == "on"
         assert entity._last_real_target_temp == 23.0
 
 
@@ -81,17 +66,8 @@ class TestSSOTChangeValidation:
         ent = make_entity(
             ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
         )
-        ent._ssot_hvac_mode = "heat"
-        ent._last_real_target_temp = 22.0
-        ent._ssot_fan_mode = "auto"
-        ent._ssot_swing_mode = "off"
+        seed_core_baselines(ent)
         ent._target_temp_step = 0.5
-        ent._active_tracked_settings = {
-            TrackableSetting.HVAC_MODE,
-            TrackableSetting.TEMPERATURE,
-            TrackableSetting.FAN_MODE,
-            TrackableSetting.SWING_MODE,
-        }
         return ent
 
     def test_accepts_single_temp_step(self, entity) -> None:
@@ -100,9 +76,9 @@ class TestSSOTChangeValidation:
         assert entity._validate_thermostat_change(new) is True
 
     def test_rejects_multi_step_temp_change(self, entity) -> None:
-        """A temperature jump of 3 steps should be rejected."""
+        """A single temperature change is accepted regardless of step size."""
         new = _state(hvac="heat", temperature=23.5, fan_mode="auto", swing_mode="off")
-        assert entity._validate_thermostat_change(new) is False
+        assert entity._validate_thermostat_change(new) is True
 
     def test_rejects_compound_changes(self, entity) -> None:
         """Simultaneous HVAC mode + fan mode change should be rejected."""
@@ -127,16 +103,7 @@ class TestITBlocking:
             it_settings=["hvac_mode"],
             ssot_settings=["temperature"],
         )
-        ent._ssot_hvac_mode = "heat"
-        ent._last_real_target_temp = 22.0
-        ent._ssot_fan_mode = "auto"
-        ent._ssot_swing_mode = "off"
-        ent._active_tracked_settings = {
-            TrackableSetting.HVAC_MODE,
-            TrackableSetting.TEMPERATURE,
-            TrackableSetting.FAN_MODE,
-            TrackableSetting.SWING_MODE,
-        }
+        seed_core_baselines(ent)
         return ent
 
     def test_it_setting_in_it_settings(self, entity) -> None:
@@ -195,16 +162,7 @@ class TestUntrackedSettingsPassThrough:
         entity = make_entity(
             ssot_settings=["hvac_mode"],  # Only HVAC is SSOT-tracked
         )
-        entity._ssot_hvac_mode = "heat"
-        entity._last_real_target_temp = 22.0
-        entity._ssot_fan_mode = "auto"
-        entity._ssot_swing_mode = "off"
-        entity._active_tracked_settings = {
-            TrackableSetting.HVAC_MODE,
-            TrackableSetting.TEMPERATURE,
-            TrackableSetting.FAN_MODE,
-            TrackableSetting.SWING_MODE,
-        }
+        seed_core_baselines(entity)
 
         # Temperature jumps by 5° — but temperature is NOT SSOT-tracked
         new = _state(hvac="heat", temperature=27.0, fan_mode="auto", swing_mode="off")
@@ -228,3 +186,60 @@ class TestUntrackedSettingsPassThrough:
         assert "temperature" not in ssot_changes
         assert len(blocked) == 0
         assert len(ssot_changes) == 0
+
+
+class TestExternalEventPolicy:
+    """External event handling follows deterministic echo + SSOT/IT policy."""
+
+    def _event(self, old_state, new_state):
+        return SimpleNamespace(data={"old_state": old_state, "new_state": new_state})
+
+    def test_it_rejects_all_external_changes(self, hass, make_entity) -> None:
+        entity = make_entity(it_settings=["hvac_mode"])
+        seed_core_baselines(entity)
+        old = _state(hvac="heat", temperature=22.0, fan_mode="auto", swing_mode="off")
+        new = _state(hvac="cool", temperature=22.0, fan_mode="auto", swing_mode="off")
+        entity._real_state = old
+        entity._schedule_target_realign = lambda *args, **kwargs: None
+        entity.async_write_ha_state = lambda: None
+        entity._async_correct_physical_device = AsyncMock()
+        entity.hass.async_create_task = lambda coro: coro.close()
+
+        entity._async_handle_real_state_event(self._event(old, new))
+
+        assert entity._real_state == old
+        entity._async_correct_physical_device.assert_called_once()
+
+    def test_ssot_rejects_compound_external_changes(self, hass, make_entity) -> None:
+        entity = make_entity(ssot_settings=["hvac_mode", "temperature"])
+        seed_core_baselines(entity)
+        old = _state(hvac="heat", temperature=22.0, fan_mode="auto", swing_mode="off")
+        new = _state(hvac="cool", temperature=23.0, fan_mode="auto", swing_mode="off")
+        entity._real_state = old
+        entity._schedule_target_realign = lambda *args, **kwargs: None
+        entity.async_write_ha_state = lambda: None
+        entity._async_correct_physical_device = AsyncMock()
+        entity.hass.async_create_task = lambda coro: coro.close()
+
+        entity._async_handle_real_state_event(self._event(old, new))
+
+        assert entity._real_state == old
+        entity._async_correct_physical_device.assert_called_once()
+
+    def test_ssot_accepts_single_external_temperature_change(self, hass, make_entity) -> None:
+        entity = make_entity(ssot_settings=["hvac_mode", "temperature"])
+        seed_core_baselines(entity)
+        old = _state(hvac="heat", temperature=22.0, fan_mode="auto", swing_mode="off")
+        new = _state(hvac="heat", temperature=23.0, fan_mode="auto", swing_mode="off")
+        entity._real_state = old
+        entity._schedule_target_realign = lambda *args, **kwargs: None
+        entity.async_write_ha_state = lambda: None
+        entity._async_correct_physical_device = AsyncMock()
+        entity.hass.async_create_task = lambda coro: coro.close()
+        entity._handle_external_real_target_change = MagicMock()
+
+        entity._async_handle_real_state_event(self._event(old, new))
+
+        entity._async_correct_physical_device.assert_not_called()
+        assert entity._last_real_target_temp == 23.0
+        entity._handle_external_real_target_change.assert_called_once_with(23.0)

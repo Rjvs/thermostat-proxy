@@ -314,13 +314,13 @@ class TestServiceForwarding:
         ent = make_entity(
             ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode", "swing_horizontal_mode"],
         )
-        ent._ssot_swing_horizontal_mode = "off"
+        ent._ssot_baselines[TrackableSetting.SWING_HORIZONTAL_MODE] = "off"
         _seed_entity(hass, ent)
 
         with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
             await ent.async_set_swing_horizontal_mode("horizontal")
 
-        assert ent._ssot_swing_horizontal_mode == "horizontal"
+        assert ent._ssot_baselines.get(TrackableSetting.SWING_HORIZONTAL_MODE) == "horizontal"
 
     async def test_turn_on_forwards(
         self, hass: HomeAssistant, make_entity
@@ -360,31 +360,79 @@ class TestServiceForwarding:
             )
 
 
-# ── IT override for swing_horizontal_mode ─────────────────────────────
+# ── Parametrized IT overrides for optional settings ──────────────────
+
+# (it_key, setting, baseline_val, state_kwarg, real_val, prop_name, expected_real)
+_IT_OVERRIDE_CASES = [
+    ("swing_horizontal_mode", TrackableSetting.SWING_HORIZONTAL_MODE, "horizontal", {"swing_horizontal_mode": "off"}, "swing_horizontal_mode", "off"),
+    ("target_temp_high", TrackableSetting.TARGET_TEMP_HIGH, 28.0, {"target_temp_high": 25.0}, "target_temperature_high", 25.0),
+    ("target_temp_low", TrackableSetting.TARGET_TEMP_LOW, 16.0, {"target_temp_low": 18.0}, "target_temperature_low", 18.0),
+    ("target_humidity", TrackableSetting.TARGET_HUMIDITY, 60.0, {"humidity": 45}, "target_humidity", 45),
+]
 
 
-class TestSwingHorizontalModeITOverride:
-    """When IT locks swing_horizontal_mode, the proxy shows its own baseline."""
+class TestITOverrideParametrized:
+    """IT-locked settings return the proxy's baseline; otherwise the real value."""
 
+    @pytest.mark.parametrize(
+        "it_key,setting,baseline,state_kwargs,prop_name,expected_real",
+        _IT_OVERRIDE_CASES,
+        ids=[c[0] for c in _IT_OVERRIDE_CASES],
+    )
     def test_it_returns_baseline(
-        self, hass: HomeAssistant, make_entity
+        self, hass, make_entity,
+        it_key, setting, baseline, state_kwargs, prop_name, expected_real,
     ) -> None:
-        ent = make_entity(it_settings=["swing_horizontal_mode"])
-        ent._ssot_swing_horizontal_mode = "horizontal"
-        state = _make_full_state(swing_horizontal_mode="off")
-        _seed_entity(hass, ent, state)
+        ent = make_entity(it_settings=[it_key])
+        ent._ssot_baselines[setting] = baseline
+        _seed_entity(hass, ent, _make_full_state(**state_kwargs))
+        assert getattr(ent, prop_name) == baseline
 
-        assert ent.swing_horizontal_mode == "horizontal"
-
+    @pytest.mark.parametrize(
+        "it_key,setting,baseline,state_kwargs,prop_name,expected_real",
+        _IT_OVERRIDE_CASES,
+        ids=[c[0] for c in _IT_OVERRIDE_CASES],
+    )
     def test_without_it_returns_real(
-        self, hass: HomeAssistant, make_entity
+        self, hass, make_entity,
+        it_key, setting, baseline, state_kwargs, prop_name, expected_real,
     ) -> None:
         ent = make_entity()
-        ent._ssot_swing_horizontal_mode = "horizontal"
-        state = _make_full_state(swing_horizontal_mode="off")
-        _seed_entity(hass, ent, state)
+        ent._ssot_baselines[setting] = baseline
+        _seed_entity(hass, ent, _make_full_state(**state_kwargs))
+        assert getattr(ent, prop_name) == expected_real
 
-        assert ent.swing_horizontal_mode == "off"
+
+# ── Humidity SSOT baseline update ────────────────────────────────────
+
+
+class TestSetHumiditySSoT:
+    """async_set_humidity updates SSOT baseline when enabled."""
+
+    async def test_set_humidity_updates_ssot_baseline(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        ent = make_entity(
+            ssot_settings=["target_humidity"],
+        )
+        ent._ssot_baselines[TrackableSetting.TARGET_HUMIDITY] = 45.0
+        _seed_entity(hass, ent)
+
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
+            await ent.async_set_humidity(60)
+
+        assert ent._ssot_baselines.get(TrackableSetting.TARGET_HUMIDITY) == 60.0
+
+    async def test_set_humidity_no_ssot_no_baseline(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        ent = make_entity()  # No SSOT
+        _seed_entity(hass, ent)
+
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
+            await ent.async_set_humidity(60)
+
+        assert ent._ssot_baselines.get(TrackableSetting.TARGET_HUMIDITY) is None
 
 
 # ── Holistic mirror test ──────────────────────────────────────────────

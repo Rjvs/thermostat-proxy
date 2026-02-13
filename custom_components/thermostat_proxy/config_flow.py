@@ -7,7 +7,6 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.components.climate.const import ClimateEntityFeature
 from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv, selector
@@ -55,9 +54,13 @@ def _build_available_settings(
     hass, thermostat_entity_id: str | None
 ) -> list[selector.SelectOptionDict]:
     """Probe device capabilities and return trackable setting options."""
+    from .climate_model import TrackableSetting
+
+    # Core settings (no feature_flag) are always available.
     options: list[selector.SelectOptionDict] = [
-        selector.SelectOptionDict(value="hvac_mode", label="HVAC mode"),
-        selector.SelectOptionDict(value="temperature", label="Temperature"),
+        selector.SelectOptionDict(value=s.attr_key, label=s.label)
+        for s in TrackableSetting
+        if s.feature_flag is None
     ]
     if not thermostat_entity_id:
         return options
@@ -65,31 +68,11 @@ def _build_available_settings(
     state = hass.states.get(thermostat_entity_id)
     supported = state.attributes.get("supported_features", 0) if state else 0
 
-    if supported & ClimateEntityFeature.FAN_MODE:
-        options.append(
-            selector.SelectOptionDict(value="fan_mode", label="Fan mode")
-        )
-    if supported & ClimateEntityFeature.SWING_MODE:
-        options.append(
-            selector.SelectOptionDict(value="swing_mode", label="Swing mode")
-        )
-    if supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
-        options.append(
-            selector.SelectOptionDict(
-                value="target_temp_high", label="Target temp high"
+    for s in TrackableSetting:
+        if s.feature_flag is not None and supported & s.feature_flag:
+            options.append(
+                selector.SelectOptionDict(value=s.attr_key, label=s.label)
             )
-        )
-        options.append(
-            selector.SelectOptionDict(
-                value="target_temp_low", label="Target temp low"
-            )
-        )
-    if supported & ClimateEntityFeature.TARGET_HUMIDITY:
-        options.append(
-            selector.SelectOptionDict(
-                value="target_humidity", label="Target humidity"
-            )
-        )
     return options
 
 
@@ -112,6 +95,56 @@ def _migrate_bool_to_settings(
     if old_bool:
         return list(all_setting_keys)
     return []
+
+
+def _validate_temp_range(
+    min_temp: float | None, max_temp: float | None
+) -> str | None:
+    """Return an error key if the temp range is invalid, else None."""
+    if min_temp is not None and max_temp is not None and min_temp >= max_temp:
+        return "invalid_temp_range"
+    return None
+
+
+def _build_common_schema_fields(
+    schema_fields: dict,
+    available_settings: list[selector.SelectOptionDict],
+    *,
+    cooldown_default: int = DEFAULT_COOLDOWN_PERIOD,
+    min_temp: float | None = None,
+    max_temp: float | None = None,
+    ssot_settings: list[str] | None = None,
+    it_settings: list[str] | None = None,
+) -> None:
+    """Add the shared cooldown / temp-range / SSOT / IT fields to *schema_fields*."""
+    schema_fields[
+        vol.Optional(CONF_COOLDOWN_PERIOD, default=cooldown_default)
+    ] = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0, max=300, unit_of_measurement="seconds",
+            mode=selector.NumberSelectorMode.BOX,
+        )
+    )
+
+    number_selector = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            max=100, step=0.5, mode=selector.NumberSelectorMode.BOX,
+        )
+    )
+    min_temp_default = min_temp if min_temp is not None else 0
+    max_temp_default = max_temp if max_temp is not None else 0
+    schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
+    schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
+
+    settings_selector = selector.SelectSelector(
+        selector.SelectSelectorConfig(options=available_settings, multiple=True)
+    )
+    schema_fields[
+        vol.Optional(CONF_SSOT_SETTINGS, default=ssot_settings or [])
+    ] = settings_selector
+    schema_fields[
+        vol.Optional(CONF_IT_SETTINGS, default=it_settings or [])
+    ] = settings_selector
 
 
 class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -409,8 +442,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "physical_name_conflict"
             elif default_sensor and default_sensor not in (*available_default_options, DEFAULT_SENSOR_LAST_ACTIVE):
                 errors["base"] = "invalid_default_sensor"
-            elif min_temp is not None and max_temp is not None and min_temp >= max_temp:
-                errors["base"] = "invalid_temp_range"
+            elif _validate_temp_range(min_temp, max_temp):
+                errors["base"] = _validate_temp_range(min_temp, max_temp)
             else:
                 if (
                     default_sensor
@@ -476,38 +509,16 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             ),
-            vol.Optional(
-                CONF_COOLDOWN_PERIOD, default=self._cooldown_period
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0, max=300, unit_of_measurement="seconds", mode=selector.NumberSelectorMode.BOX
-                )
-            ),
         }
-
-        number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
+        _build_common_schema_fields(
+            schema_fields,
+            available_settings,
+            cooldown_default=self._cooldown_period,
+            min_temp=self._min_temp,
+            max_temp=self._max_temp,
+            ssot_settings=self._ssot_settings,
+            it_settings=self._it_settings,
         )
-
-        # Show current values as defaults during reconfigure (0 = disabled)
-        min_temp_default = self._min_temp if self._min_temp is not None else 0
-        max_temp_default = self._max_temp if self._max_temp is not None else 0
-
-        schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
-        schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
-
-        # Per-setting SSOT and Ignore-Thermostat multi-selects.
-        settings_selector = selector.SelectSelector(
-            selector.SelectSelectorConfig(
-                options=available_settings, multiple=True
-            )
-        )
-        schema_fields[
-            vol.Optional(CONF_SSOT_SETTINGS, default=self._ssot_settings)
-        ] = settings_selector
-        schema_fields[
-            vol.Optional(CONF_IT_SETTINGS, default=self._it_settings)
-        ] = settings_selector
 
         if sensor_names:
             default_options = [
@@ -633,8 +644,8 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
 
             if default_sensor and default_sensor not in (*sensor_names, DEFAULT_SENSOR_LAST_ACTIVE):
                 errors["base"] = "invalid_default_sensor"
-            elif min_temp is not None and max_temp is not None and min_temp >= max_temp:
-                errors["base"] = "invalid_temp_range"
+            elif _validate_temp_range(min_temp, max_temp):
+                errors["base"] = _validate_temp_range(min_temp, max_temp)
             else:
                 data: dict[str, Any] = {}
                 if default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
@@ -677,37 +688,15 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 default=default_choice or sensor_names[0],
             )] = selector.SelectSelector(selector_config)
 
-        schema_fields[
-            vol.Optional(CONF_COOLDOWN_PERIOD, default=current_cooldown)
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0, max=300, unit_of_measurement="seconds", mode=selector.NumberSelectorMode.BOX
-            )
+        _build_common_schema_fields(
+            schema_fields,
+            available_settings,
+            cooldown_default=current_cooldown,
+            min_temp=current_min_temp,
+            max_temp=current_max_temp,
+            ssot_settings=current_ssot_settings,
+            it_settings=current_it_settings,
         )
-
-        number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
-        )
-
-        # Show current values as defaults in options (0 = disabled)
-        min_temp_default = current_min_temp if current_min_temp is not None else 0
-        max_temp_default = current_max_temp if current_max_temp is not None else 0
-
-        schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
-        schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
-
-        # Per-setting SSOT and Ignore-Thermostat multi-selects.
-        settings_selector = selector.SelectSelector(
-            selector.SelectSelectorConfig(
-                options=available_settings, multiple=True
-            )
-        )
-        schema_fields[
-            vol.Optional(CONF_SSOT_SETTINGS, default=current_ssot_settings)
-        ] = settings_selector
-        schema_fields[
-            vol.Optional(CONF_IT_SETTINGS, default=current_it_settings)
-        ] = settings_selector
 
         data_schema = vol.Schema(schema_fields)
 

@@ -15,6 +15,10 @@ from custom_components.thermostat_proxy.const import (
     ATTR_SSOT_FAN_MODE,
     ATTR_SSOT_HVAC_MODE,
     ATTR_SSOT_SWING_MODE,
+    ATTR_SSOT_SWING_HORIZONTAL_MODE,
+    ATTR_SSOT_TARGET_TEMP_HIGH,
+    ATTR_SSOT_TARGET_TEMP_LOW,
+    ATTR_SSOT_TARGET_HUMIDITY,
 )
 from homeassistant.const import ATTR_TEMPERATURE
 
@@ -105,15 +109,45 @@ class TestRestoreSSOTBaselines:
         )
         with patch.object(entity, "async_get_last_state", return_value=last):
             await entity._async_restore_state()
-        assert entity._ssot_hvac_mode == "cool"
-        assert entity._ssot_fan_mode == "high"
-        assert entity._ssot_swing_mode == "on"
+        assert entity._ssot_baselines.get(TrackableSetting.HVAC_MODE) == "cool"
+        assert entity._ssot_baselines.get(TrackableSetting.FAN_MODE) == "high"
+        assert entity._ssot_baselines.get(TrackableSetting.SWING_MODE) == "on"
 
     async def test_no_restore_when_ssot_disabled(self, hass, make_entity) -> None:
         entity = make_entity()  # No SSOT
         last = _last_state(ssot_hvac="cool", ssot_fan="high")
         with patch.object(entity, "async_get_last_state", return_value=last):
             await entity._async_restore_state()
-        # Baselines should remain None when SSOT is off
-        assert entity._ssot_hvac_mode is None
-        assert entity._ssot_fan_mode is None
+        # Baselines should remain empty when SSOT is off
+        assert entity._ssot_baselines.get(TrackableSetting.HVAC_MODE) is None
+        assert entity._ssot_baselines.get(TrackableSetting.FAN_MODE) is None
+
+    async def test_restore_new_ssot_baselines(self, hass, make_entity) -> None:
+        """Restoration of target_temp_high, target_temp_low, target_humidity, swing_horizontal_mode."""
+        entity = make_entity(
+            ssot_settings=[
+                "hvac_mode", "temperature", "fan_mode", "swing_mode",
+                "swing_horizontal_mode", "target_temp_high", "target_temp_low",
+                "target_humidity",
+            ],
+        )
+        attrs = {
+            ATTR_SSOT_HVAC_MODE: "cool",
+            ATTR_SSOT_FAN_MODE: "high",
+            ATTR_SSOT_SWING_MODE: "on",
+            ATTR_SSOT_SWING_HORIZONTAL_MODE: "horizontal",
+            ATTR_SSOT_TARGET_TEMP_HIGH: 28.0,
+            ATTR_SSOT_TARGET_TEMP_LOW: 16.0,
+            ATTR_SSOT_TARGET_HUMIDITY: 55.0,
+        }
+        last = State("climate.test_proxy", "heat", attrs)
+        with patch.object(entity, "async_get_last_state", return_value=last):
+            await entity._async_restore_state()
+
+        assert entity._ssot_baselines.get(TrackableSetting.HVAC_MODE) == "cool"
+        assert entity._ssot_baselines.get(TrackableSetting.FAN_MODE) == "high"
+        assert entity._ssot_baselines.get(TrackableSetting.SWING_MODE) == "on"
+        assert entity._ssot_baselines.get(TrackableSetting.SWING_HORIZONTAL_MODE) == "horizontal"
+        assert entity._ssot_baselines.get(TrackableSetting.TARGET_TEMP_HIGH) == 28.0
+        assert entity._ssot_baselines.get(TrackableSetting.TARGET_TEMP_LOW) == 16.0
+        assert entity._ssot_baselines.get(TrackableSetting.TARGET_HUMIDITY) == 55.0
