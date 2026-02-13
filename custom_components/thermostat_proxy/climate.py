@@ -1378,14 +1378,64 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return self._get_active_sensor_temperature() or self._get_real_current_temperature()
 
     @property
+    def current_humidity(self) -> float | None:
+        """Return the current humidity from the real thermostat."""
+        return self._get_real_current_humidity()
+
+    @property
     def target_temperature(self) -> float | None:
         return self._virtual_target_temperature
 
     @property
+    def target_temperature_high(self) -> float | None:
+        """Return the high target temperature for range mode."""
+        if not self._real_state:
+            return None
+        return _coerce_temperature(self._real_state.attributes.get("target_temp_high"))
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        """Return the low target temperature for range mode."""
+        if not self._real_state:
+            return None
+        return _coerce_temperature(self._real_state.attributes.get("target_temp_low"))
+
+    @property
+    def target_humidity(self) -> float | None:
+        """Return the target humidity from the real thermostat."""
+        if not self._real_state:
+            return None
+        val = self._real_state.attributes.get("humidity")
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @property
     def hvac_mode(self) -> HVACMode | None:
+        if TrackableSetting.HVAC_MODE in self._it_settings and self._ssot_hvac_mode is not None:
+            try:
+                return HVACMode(self._ssot_hvac_mode)
+            except ValueError:
+                pass
         if self._real_state:
             try:
                 return HVACMode(self._real_state.state)
+            except ValueError:
+                return None
+        return None
+
+    @property
+    def hvac_action(self) -> HVACAction | None:
+        """Return the current HVAC action (heating, cooling, idle, etc.)."""
+        if not self._real_state:
+            return None
+        action = self._real_state.attributes.get(ATTR_HVAC_ACTION)
+        if action is not None:
+            try:
+                return HVACAction(action)
             except ValueError:
                 return None
         return None
@@ -1988,6 +2038,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             base_features |= ClimateEntityFeature.FAN_MODE
         if supported & ClimateEntityFeature.SWING_MODE:
             base_features |= ClimateEntityFeature.SWING_MODE
+        if supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
+            base_features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+        if supported & ClimateEntityFeature.TARGET_HUMIDITY:
+            base_features |= ClimateEntityFeature.TARGET_HUMIDITY
 
         self._attr_supported_features = base_features
 
@@ -2303,6 +2357,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     @property
     def fan_mode(self) -> str | None:
         """Return the fan setting."""
+        if TrackableSetting.FAN_MODE in self._it_settings and self._ssot_fan_mode is not None:
+            return self._ssot_fan_mode
         if self._real_state:
             return self._real_state.attributes.get("fan_mode")
         return None
@@ -2317,6 +2373,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     @property
     def swing_mode(self) -> str | None:
         """Return the swing setting."""
+        if TrackableSetting.SWING_MODE in self._it_settings and self._ssot_swing_mode is not None:
+            return self._ssot_swing_mode
         if self._real_state:
             return self._real_state.attributes.get("swing_mode")
         return None

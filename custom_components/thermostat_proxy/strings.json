@@ -4,32 +4,41 @@
     "step": {
       "user": {
         "title": "Thermostat Proxy",
-        "description": "Wrap a thermostat and expose a virtual one with selectable sensors.",
+        "description": "Set up a virtual thermostat that sits in front of your physical one, letting you use any temperature sensor in your home.",
         "data": {
           "name": "Name",
           "thermostat": "Physical thermostat"
+        },
+        "data_description": {
+          "thermostat": "The real thermostat this proxy will control."
         }
       },
       "reconfigure": {
         "title": "Reconfigure Thermostat Proxy",
-        "description": "Update the name or physical thermostat, then manage sensors.",
+        "description": "Change the name or swap the physical thermostat behind this proxy, then update your sensors.",
         "data": {
           "name": "Name",
           "thermostat": "Physical thermostat"
+        },
+        "data_description": {
+          "thermostat": "The real thermostat this proxy will control."
         }
       },
       "sensors": {
         "title": "Temperature sensors",
-        "description": "Add at least one sensor. Each one becomes a preset mode.",
+        "description": "Give this sensor a friendly name — it will appear as a preset mode on the thermostat card. You can add more sensors afterwards.",
         "data": {
           "name": "Sensor name",
-          "entity_id": "Temperature entity",
-          "add_another": "Add another sensor"
+          "entity_id": "Temperature sensor",
+          "add_another": "Add another sensor after this one"
+        },
+        "data_description": {
+          "entity_id": "Any entity that reports a temperature (e.g. a room sensor, outdoor sensor, or another climate entity)."
         }
       },
       "manage_sensors": {
         "title": "Manage sensors",
-        "description": "Current sensors: {sensor_list}",
+        "description": "Current sensors: {sensor_list}. Add or remove sensors, or continue to finish setup.",
         "data": {
           "action": "Choose what to do"
         }
@@ -42,20 +51,25 @@
         }
       },
       "finalize": {
-        "title": "Defaults",
-        "description": "Optionally rename the physical thermostat preset and decide which sensor (including the last active one) should be active on startup.",
+        "title": "Behaviour & safety",
+        "description": "Fine-tune how the proxy behaves. Defaults work well for most setups — only change these if you need to.",
         "data": {
           "physical_sensor_name": "Physical thermostat preset name",
-          "default_sensor": "Default sensor",
-          "cooldown_period": "Minimum adjustment interval (seconds)",
-          "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
-          "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
-          "ssot_settings": "Single source of truth settings",
-          "it_settings": "Ignore thermostat settings"
+          "default_sensor": "Sensor to use on startup",
+          "cooldown_period": "Minimum time between adjustments",
+          "min_temp": "Minimum temperature safety limit",
+          "max_temp": "Maximum temperature safety limit",
+          "ssot_settings": "Protect these settings from thermostat changes",
+          "it_settings": "Fully lock these settings"
         },
         "data_description": {
-          "ssot_settings": "Settings where the Proxy holds the true state, rejecting spurious changes from the physical device.",
-          "it_settings": "Settings where ALL changes from the physical thermostat are blocked. The Proxy always corrects back to its values. Changes are logged for diagnostics. These settings are automatically also SSOT-tracked."
+          "physical_sensor_name": "The name shown when you switch to the thermostat's own built-in sensor. Change this if \"Physical Entity\" isn't clear enough.",
+          "cooldown_period": "Prevents the proxy from sending adjustments too rapidly. Set to 0 to disable.",
+          "min_temp": "The proxy will never set the real thermostat below this temperature. Set to 0 to disable.",
+          "max_temp": "The proxy will never set the real thermostat above this temperature. Set to 0 to disable.",
+          "ssot_settings": "When someone adjusts these settings directly on the physical thermostat (or via its own app), the proxy will undo the change and keep its own value. Useful if the thermostat resets settings on its own.",
+          "it_settings": "The proxy will always override the physical thermostat for these settings — any change from the device is immediately reverted. This is stricter than protection above and is useful for settings you never want the physical device to control. Protected-from-changes is turned on automatically for any setting you select here.",
+          "default_sensor": "Which temperature sensor to use when Home Assistant restarts."
         }
       }
     },
@@ -78,17 +92,22 @@
     "step": {
       "init": {
         "title": "Thermostat Proxy options",
+        "description": "Adjust proxy behaviour without going through full reconfiguration.",
         "data": {
-          "default_sensor": "Default sensor",
-          "cooldown_period": "Minimum adjustment interval (seconds)",
-          "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
-          "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
-          "ssot_settings": "Single source of truth settings",
-          "it_settings": "Ignore thermostat settings"
+          "default_sensor": "Sensor to use on startup",
+          "cooldown_period": "Minimum time between adjustments",
+          "min_temp": "Minimum temperature safety limit",
+          "max_temp": "Maximum temperature safety limit",
+          "ssot_settings": "Protect these settings from thermostat changes",
+          "it_settings": "Fully lock these settings"
         },
         "data_description": {
-          "ssot_settings": "Settings where the Proxy holds the true state, rejecting spurious changes from the physical device.",
-          "it_settings": "Settings where ALL changes from the physical thermostat are blocked. The Proxy always corrects back to its values. Changes are logged for diagnostics. These settings are automatically also SSOT-tracked."
+          "cooldown_period": "Prevents the proxy from sending adjustments too rapidly. Set to 0 to disable.",
+          "min_temp": "The proxy will never set the real thermostat below this temperature. Set to 0 to disable.",
+          "max_temp": "The proxy will never set the real thermostat above this temperature. Set to 0 to disable.",
+          "ssot_settings": "When someone adjusts these settings directly on the physical thermostat (or via its own app), the proxy will undo the change and keep its own value. Useful if the thermostat resets settings on its own.",
+          "it_settings": "The proxy will always override the physical thermostat for these settings — any change from the device is immediately reverted. This is stricter than protection above and is useful for settings you never want the physical device to control. Protected-from-changes is turned on automatically for any setting you select here.",
+          "default_sensor": "Which temperature sensor to use when Home Assistant restarts."
         }
       }
     },
