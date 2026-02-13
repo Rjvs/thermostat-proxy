@@ -156,6 +156,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._suppress_sync_logs_until: float | None = None
         self._cooldown_timer_unsub: Callable[[], None] | None = None
         self._last_non_off_hvac_mode: HVACMode | None = None
+        self._startup_complete = False
         # Per-setting SSOT / Ignore-Thermostat configuration.
         # Migrate old boolean config to new per-setting lists.
         if ssot_settings is not None:
@@ -225,6 +226,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             ):
                 self._seed_ssot_baselines(self._real_state)
         await self._async_subscribe_to_states()
+        self._startup_complete = True
 
     async def _async_subscribe_to_states(self) -> None:
         """Listen for updates to real thermostat and sensors."""
@@ -1635,6 +1637,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if previous == is_available:
             return
         self._entity_health[entity_id] = is_available
+        # During startup discovery, missing states are common and not actionable.
+        if (
+            not self._startup_complete
+            and previous is None
+            and not is_available
+        ):
+            _LOGGER.debug(
+                "Entity %s not yet available during startup for %s",
+                entity_id,
+                self.entity_id,
+            )
+            return
         if not is_available:
             _LOGGER.warning(
                 "Entity %s became unavailable for %s; using fallbacks where possible",

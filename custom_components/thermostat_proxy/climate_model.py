@@ -113,7 +113,14 @@ class TrackableSetting(Enum):
                 else PENDING_REQUEST_TOLERANCE_MAX
             )
             return math.isclose(a, b, abs_tol=tol)
-        return a == b
+        return self._normalize_discrete(a) == self._normalize_discrete(b)
+
+    @staticmethod
+    def _normalize_discrete(value: Any) -> Any:
+        """Normalize enums and other wrappers for deterministic equality."""
+        if isinstance(value, Enum):
+            return value.value
+        return value
 
 
 _TRACKABLE_SETTING_BY_KEY: dict[str, TrackableSetting] = {
