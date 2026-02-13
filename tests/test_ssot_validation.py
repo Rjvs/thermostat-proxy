@@ -53,20 +53,20 @@ class TestBaselineSeeding:
             TrackableSetting.SWING_MODE,
         }
         # Baselines start as None
-        assert entity._ssot_hvac_mode is None
+        assert entity._ssot_baselines.get(TrackableSetting.HVAC_MODE) is None
 
         # Simulate what the event handler does on first valid event:
         # it checks _ssot_hvac_mode is None and seeds.
         new = _state(hvac="cool", temperature=23.0, fan_mode="high", swing_mode="on")
         # Manually exercise the seeding path:
-        entity._ssot_hvac_mode = new.state
-        entity._ssot_fan_mode = new.attributes.get("fan_mode")
-        entity._ssot_swing_mode = new.attributes.get("swing_mode")
+        entity._ssot_baselines[TrackableSetting.HVAC_MODE] = new.state
+        entity._ssot_baselines[TrackableSetting.FAN_MODE] = new.attributes.get("fan_mode")
+        entity._ssot_baselines[TrackableSetting.SWING_MODE] = new.attributes.get("swing_mode")
         entity._last_real_target_temp = 23.0
 
-        assert entity._ssot_hvac_mode == "cool"
-        assert entity._ssot_fan_mode == "high"
-        assert entity._ssot_swing_mode == "on"
+        assert entity._ssot_baselines.get(TrackableSetting.HVAC_MODE) == "cool"
+        assert entity._ssot_baselines.get(TrackableSetting.FAN_MODE) == "high"
+        assert entity._ssot_baselines.get(TrackableSetting.SWING_MODE) == "on"
         assert entity._last_real_target_temp == 23.0
 
 
@@ -81,10 +81,10 @@ class TestSSOTChangeValidation:
         ent = make_entity(
             ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
         )
-        ent._ssot_hvac_mode = "heat"
+        ent._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
         ent._last_real_target_temp = 22.0
-        ent._ssot_fan_mode = "auto"
-        ent._ssot_swing_mode = "off"
+        ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
+        ent._ssot_baselines[TrackableSetting.SWING_MODE] = "off"
         ent._target_temp_step = 0.5
         ent._active_tracked_settings = {
             TrackableSetting.HVAC_MODE,
@@ -127,10 +127,10 @@ class TestITBlocking:
             it_settings=["hvac_mode"],
             ssot_settings=["temperature"],
         )
-        ent._ssot_hvac_mode = "heat"
+        ent._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
         ent._last_real_target_temp = 22.0
-        ent._ssot_fan_mode = "auto"
-        ent._ssot_swing_mode = "off"
+        ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
+        ent._ssot_baselines[TrackableSetting.SWING_MODE] = "off"
         ent._active_tracked_settings = {
             TrackableSetting.HVAC_MODE,
             TrackableSetting.TEMPERATURE,
@@ -195,10 +195,10 @@ class TestUntrackedSettingsPassThrough:
         entity = make_entity(
             ssot_settings=["hvac_mode"],  # Only HVAC is SSOT-tracked
         )
-        entity._ssot_hvac_mode = "heat"
+        entity._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
         entity._last_real_target_temp = 22.0
-        entity._ssot_fan_mode = "auto"
-        entity._ssot_swing_mode = "off"
+        entity._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
+        entity._ssot_baselines[TrackableSetting.SWING_MODE] = "off"
         entity._active_tracked_settings = {
             TrackableSetting.HVAC_MODE,
             TrackableSetting.TEMPERATURE,

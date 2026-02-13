@@ -38,6 +38,9 @@ ATTR_SSOT_HVAC_MODE = "ssot_hvac_mode"
 ATTR_SSOT_FAN_MODE = "ssot_fan_mode"
 ATTR_SSOT_SWING_MODE = "ssot_swing_mode"
 ATTR_SSOT_SWING_HORIZONTAL_MODE = "ssot_swing_horizontal_mode"
+ATTR_SSOT_TARGET_TEMP_HIGH = "ssot_target_temp_high"
+ATTR_SSOT_TARGET_TEMP_LOW = "ssot_target_temp_low"
+ATTR_SSOT_TARGET_HUMIDITY = "ssot_target_humidity"
 ATTR_IGNORE_THERMOSTAT = "ignore_thermostat"
 
 OVERDRIVE_ADJUSTMENT_HEAT = 1.0

@@ -236,16 +236,16 @@ class TestSetHvacMode:
     async def test_set_hvac_mode_updates_baseline_when_ssot(
         self, hass: HomeAssistant, make_entity
     ) -> None:
-        """With SSOT enabled, _ssot_hvac_mode should be updated."""
+        """With SSOT enabled, SSOT baseline should be updated."""
         ent = make_entity(
             ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
         )
-        ent._ssot_hvac_mode = "heat"
+        ent._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
 
         with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
             await ent.async_set_hvac_mode(HVACMode.COOL)
 
-        assert ent._ssot_hvac_mode == HVACMode.COOL
+        assert ent._ssot_baselines.get(TrackableSetting.HVAC_MODE) == HVACMode.COOL
 
 
 # ── async_set_fan_mode ───────────────────────────────────────────────
@@ -268,16 +268,16 @@ class TestSetFanMode:
     async def test_set_fan_mode_updates_baseline_when_ssot(
         self, hass: HomeAssistant, make_entity
     ) -> None:
-        """With SSOT, _ssot_fan_mode should be updated."""
+        """With SSOT, SSOT baseline should be updated."""
         ent = make_entity(
             ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
         )
-        ent._ssot_fan_mode = "auto"
+        ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
 
         with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
             await ent.async_set_fan_mode("high")
 
-        assert ent._ssot_fan_mode == "high"
+        assert ent._ssot_baselines.get(TrackableSetting.FAN_MODE) == "high"
 
 
 # ── async_set_preset_mode ────────────────────────────────────────────
