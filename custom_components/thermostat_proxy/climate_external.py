@@ -50,14 +50,31 @@ def handle_real_state_event(entity, event) -> bool:
         _LOGGER.debug("State update reconciled as deterministic echo")
         return True
 
-    if _should_reject_external_change(entity, changes):
+    rejection_reason = _rejection_reason(entity, changes)
+    if rejection_reason is not None:
+        echo_diag = _build_echo_diagnostics(entity, changes)
+        context = getattr(new_state, "context", None)
+        context_diag = (
+            f"id={getattr(context, 'id', None)!r},"
+            f"parent_id={getattr(context, 'parent_id', None)!r},"
+            f"user_id={getattr(context, 'user_id', None)!r}"
+            if context is not None
+            else "none"
+        )
         change_str = "; ".join(
             f"{setting.attr_key}: {canonical!r} -> {incoming!r}"
             for setting, canonical, incoming in changes
         )
+        hint = ""
+        if rejection_reason == "ignore_thermostat" and "pending=[]" in echo_diag:
+            hint = " (no proxy pending requests; this write likely bypassed the proxy entity)"
         _LOGGER.warning(
-            "Rejected external change from %s: %s",
+            "Rejected external change from %s (reason=%s, context=%s, echo=%s)%s: %s",
             entity._real_entity_id,
+            rejection_reason,
+            context_diag,
+            echo_diag,
+            hint,
             change_str,
         )
         entity._real_state = previous_real_state
@@ -91,12 +108,12 @@ def _collect_canonical_changes(entity, new_state, previous_real_state) -> list[t
     return changes
 
 
-def _should_reject_external_change(entity, changes: list[tuple[Any, Any, Any]]) -> bool:
-    """Return True when policy requires rejecting this external change."""
+def _rejection_reason(entity, changes: list[tuple[Any, Any, Any]]) -> str | None:
+    """Return a reason string when policy requires rejection, else None."""
 
     # Ignore Thermostat mode rejects all external tracked-setting changes.
     if entity._ignore_thermostat:
-        return True
+        return "ignore_thermostat"
 
     # Single Source of Truth accepts at most one externally changed SSOT setting.
     if entity._single_source_of_truth:
@@ -106,9 +123,9 @@ def _should_reject_external_change(entity, changes: list[tuple[Any, Any, Any]]) 
             if setting in entity._ssot_settings
         ]
         if len(ssot_changes) > 1:
-            return True
+            return "ssot_compound_change"
 
-    return False
+    return None
 
 
 def _consume_echo_changes(entity, changes: list[tuple[Any, Any, Any]]) -> bool:
@@ -131,6 +148,18 @@ def _consume_echo_changes(entity, changes: list[tuple[Any, Any, Any]]) -> bool:
         entity._set_ssot_baseline(setting, incoming)
 
     return True
+
+
+def _build_echo_diagnostics(entity, changes: list[tuple[Any, Any, Any]]) -> str:
+    """Return compact diagnostics about why deterministic echo did not match."""
+    entries: list[str] = []
+    for setting, _canonical, incoming in changes:
+        idx = _find_pending_match_index(entity, setting, incoming)
+        pending_vals = [v for v, _ts in entity._pending_setting_requests[setting]]
+        entries.append(
+            f"{setting.attr_key}:incoming={incoming!r},pending={pending_vals!r},match_index={idx!r}"
+        )
+    return " | ".join(entries)
 
 
 def _find_pending_match_index(entity, setting, incoming) -> int | None:

@@ -76,6 +76,13 @@ class TestValuesMatch:
     def test_enum_exact_match(self) -> None:
         assert TrackableSetting.FAN_MODE.values_match("auto", "auto")
 
+    def test_enum_string_match(self) -> None:
+        assert TrackableSetting.HVAC_MODE.values_match("off", "off")
+
+    def test_enum_object_matches_string(self) -> None:
+        from homeassistant.components.climate.const import HVACMode
+        assert TrackableSetting.HVAC_MODE.values_match(HVACMode.OFF, "off")
+
     def test_enum_mismatch(self) -> None:
         assert not TrackableSetting.FAN_MODE.values_match("auto", "low")
 

@@ -156,6 +156,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._suppress_sync_logs_until: float | None = None
         self._cooldown_timer_unsub: Callable[[], None] | None = None
         self._last_non_off_hvac_mode: HVACMode | None = None
+        self._startup_complete = False
         # Per-setting SSOT / Ignore-Thermostat configuration.
         # Migrate old boolean config to new per-setting lists.
         if ssot_settings is not None:
@@ -225,6 +226,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             ):
                 self._seed_ssot_baselines(self._real_state)
         await self._async_subscribe_to_states()
+        self._startup_complete = True
 
     async def _async_subscribe_to_states(self) -> None:
         """Listen for updates to real thermostat and sensors."""
@@ -867,9 +869,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def available(self) -> bool:
-        if not self._real_state:
-            return False
-        if self._real_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        # Keep proxy available after startup even if the physical entity is
+        # temporarily unavailable; health is exposed via attributes.
+        if not self._startup_complete and not self._real_state:
             return False
         return True
 
@@ -898,6 +900,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     )
                     for item in self._sensors
                 },
+                "real_entity_available": bool(
+                    self._real_state
+                    and self._real_state.state
+                    not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+                ),
+                "startup_complete": self._startup_complete,
                 ATTR_UNAVAILABLE_ENTITIES: sorted(
                     entity
                     for entity, healthy in self._entity_health.items()
@@ -951,6 +959,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self,
         *,
         pending_updates: list[tuple[TrackableSetting, Any]],
+        operation: str = "write",
         canonical_updates: list[tuple[TrackableSetting, Any]] | None = None,
         optimistic_real_target: float | None = None,
         suppress_auto_sync: bool = False,
@@ -977,6 +986,22 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._last_real_write_time = time.monotonic()
         if suppress_auto_sync:
             self._start_auto_sync_log_suppression()
+
+        context_id = getattr(self._context, "id", None)
+        context_user = getattr(self._context, "user_id", None)
+        pending_snapshot = {
+            setting.attr_key: [v for v, _ts in self._pending_setting_requests[setting]]
+            for setting, _value in pending_updates
+        }
+        _LOGGER.debug(
+            "%s started for %s (context_id=%r user_id=%r pending_updates=%r pending_snapshot=%r)",
+            operation,
+            self.entity_id,
+            context_id,
+            context_user,
+            [(s.attr_key, v) for s, v in pending_updates],
+            pending_snapshot,
+        )
 
         return snapshot
 
@@ -1038,6 +1063,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 ] if self._single_source_of_truth else []
                 snapshot = self._begin_write_transaction(
                     pending_updates=pending_updates,
+                    operation="set_temperature_range",
                     canonical_updates=canonical_updates,
                     suppress_auto_sync=True,
                 )
@@ -1097,6 +1123,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             snapshot = self._begin_write_transaction(
                 pending_updates=pending_updates,
+                operation="set_temperature",
                 canonical_updates=canonical_updates,
                 optimistic_real_target=real_target,
                 suppress_auto_sync=True,
@@ -1136,6 +1163,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
         snapshot = self._begin_write_transaction(
             pending_updates=pending_updates,
+            operation=f"forward_{setting.attr_key}",
             canonical_updates=canonical_updates,
         )
 
@@ -1197,6 +1225,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         snapshot = self._begin_write_transaction(
             pending_updates=pending_updates,
+            operation="turn_on",
             canonical_updates=canonical_updates,
         )
         try:
@@ -1223,6 +1252,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
         snapshot = self._begin_write_transaction(
             pending_updates=pending_updates,
+            operation="turn_off",
             canonical_updates=canonical_updates,
         )
         try:
@@ -1504,6 +1534,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             snapshot = self._begin_write_transaction(
                 pending_updates=pending_updates,
+                operation="sensor_realign",
                 canonical_updates=canonical_updates,
                 optimistic_real_target=desired_real_target,
                 suppress_auto_sync=True,
@@ -1635,6 +1666,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if previous == is_available:
             return
         self._entity_health[entity_id] = is_available
+        # During startup discovery, missing states are common and not actionable.
+        if (
+            not self._startup_complete
+            and previous is None
+            and not is_available
+        ):
+            _LOGGER.debug(
+                "Entity %s not yet available during startup for %s",
+                entity_id,
+                self.entity_id,
+            )
+            return
         if not is_available:
             _LOGGER.warning(
                 "Entity %s became unavailable for %s; using fallbacks where possible",
