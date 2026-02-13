@@ -73,6 +73,12 @@ def _build_available_settings(
         options.append(
             selector.SelectOptionDict(value="swing_mode", label="Swing mode")
         )
+    if supported & ClimateEntityFeature.SWING_HORIZONTAL_MODE:
+        options.append(
+            selector.SelectOptionDict(
+                value="swing_horizontal_mode", label="Swing horizontal mode"
+            )
+        )
     if supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
         options.append(
             selector.SelectOptionDict(

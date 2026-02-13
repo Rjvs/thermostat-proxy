@@ -36,10 +36,11 @@ def entity(hass: HomeAssistant, make_entity):
         ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
     )
     # Seed baselines so echo detection has something to compare against.
-    ent._ssot_hvac_mode = "heat"
+    ent._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
     ent._last_real_target_temp = 22.0
-    ent._ssot_fan_mode = "auto"
-    ent._ssot_swing_mode = "off"
+    ent._ssot_baselines[TrackableSetting.TEMPERATURE] = 22.0
+    ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
+    ent._ssot_baselines[TrackableSetting.SWING_MODE] = "off"
     # Ensure all four settings are active.
     ent._active_tracked_settings = {
         TrackableSetting.HVAC_MODE,
@@ -81,7 +82,7 @@ class TestIsEchoOfOurChange:
 
     def test_skips_none_baseline(self, entity) -> None:
         # If a baseline is None, echo detection should skip that setting.
-        entity._ssot_fan_mode = None
+        del entity._ssot_baselines[TrackableSetting.FAN_MODE]
         new = _state(hvac="heat", temperature=22.0, fan_mode="high", swing_mode="off")
         # fan_mode baseline is None → skipped → still echo
         assert entity._is_echo_of_our_change(new) is True

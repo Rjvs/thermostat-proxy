@@ -62,10 +62,6 @@ from .const import (
     ATTR_REAL_TARGET_TEMPERATURE,
     ATTR_REAL_CURRENT_HUMIDITY,
     ATTR_SELECTED_SENSOR_OPTIONS,
-    ATTR_SSOT_FAN_MODE,
-    ATTR_SSOT_HVAC_MODE,
-    ATTR_SSOT_SWING_HORIZONTAL_MODE,
-    ATTR_SSOT_SWING_MODE,
     ATTR_UNAVAILABLE_ENTITIES,
     CONF_IGNORE_THERMOSTAT,
     CONF_IT_SETTINGS,
@@ -131,48 +127,51 @@ _RESERVED_REAL_ATTRIBUTES = {
     "precision",
 }
 
-# Single Source of Truth: user-controllable temperature attributes.
-# Each is checked against `target_temp_step`; a jump larger than one step
-# is treated as spurious input.
-_SSOT_TEMPERATURE_ATTRIBUTES = frozenset({
-    "temperature",
-    "target_temp_high",
-    "target_temp_low",
-})
-
-# Single Source of Truth: user-controllable enum/discrete attributes.
-# A change to any one of these counts as a single user action.
-_SSOT_ENUM_ATTRIBUTES = frozenset({
-    "fan_mode",
-    "swing_mode",
-    "swing_horizontal_mode",
+# Settings that require grouped correction (set_temperature with both
+# target_temp_high and target_temp_low in a single service call).
+_RANGE_TEMP_SETTINGS = frozenset({
+    TrackableSetting.TARGET_TEMP_HIGH,
+    TrackableSetting.TARGET_TEMP_LOW,
 })
 
 
 class TrackableSetting(Enum):
     """Writable climate attributes tracked for echo detection and SSOT.
 
-    Each member carries metadata for dispatch-free extraction and comparison:
-      attr_key  – attribute name in state.attributes (or state.state for HVAC_MODE)
-      is_state  – True means read from state.state instead of state.attributes
-      is_numeric – True means use math.isclose for comparison (temperature-like)
+    Each member carries metadata for dispatch-free extraction, comparison,
+    and service-call dispatch:
+      attr_key        – attribute name in state.attributes (or state.state)
+      is_state        – True means read from state.state instead of attrs
+      is_numeric      – True means use math.isclose for comparison
+      service         – HA climate service to call for correction
+      service_attr    – key in the service-call data payload
+      uses_temp_step  – True means validate step size against target_temp_step
     """
 
-    HVAC_MODE = ("hvac_mode", True, False)
-    TEMPERATURE = ("temperature", False, True)
-    FAN_MODE = ("fan_mode", False, False)
-    SWING_MODE = ("swing_mode", False, False)
-    TARGET_TEMP_HIGH = ("target_temp_high", False, True)
-    TARGET_TEMP_LOW = ("target_temp_low", False, True)
-    TARGET_HUMIDITY = ("target_humidity", False, True)
-    SWING_HORIZONTAL_MODE = ("swing_horizontal_mode", False, False)
+    HVAC_MODE = ("hvac_mode", True, False, "set_hvac_mode", "hvac_mode", False)
+    TEMPERATURE = ("temperature", False, True, "set_temperature", "temperature", True)
+    FAN_MODE = ("fan_mode", False, False, "set_fan_mode", "fan_mode", False)
+    SWING_MODE = ("swing_mode", False, False, "set_swing_mode", "swing_mode", False)
+    TARGET_TEMP_HIGH = ("target_temp_high", False, True, "set_temperature", "target_temp_high", True)
+    TARGET_TEMP_LOW = ("target_temp_low", False, True, "set_temperature", "target_temp_low", True)
+    TARGET_HUMIDITY = ("target_humidity", False, True, "set_humidity", "humidity", False)
+    SWING_HORIZONTAL_MODE = ("swing_horizontal_mode", False, False, "set_swing_horizontal_mode", "swing_horizontal_mode", False)
 
     def __init__(
-        self, attr_key: str, is_state: bool, is_numeric: bool
+        self,
+        attr_key: str,
+        is_state: bool,
+        is_numeric: bool,
+        service: str,
+        service_attr: str,
+        uses_temp_step: bool,
     ) -> None:
         self.attr_key = attr_key
         self.is_state = is_state
         self.is_numeric = is_numeric
+        self.service = service
+        self.service_attr = service_attr
+        self.uses_temp_step = uses_temp_step
 
     def read_from(self, state: State) -> Any:
         """Extract this setting's value from a HA State object."""
@@ -480,10 +479,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         # IT implies SSOT for those settings.
         self._ssot_settings |= self._it_settings
 
-        self._ssot_hvac_mode: str | None = None
-        self._ssot_fan_mode: str | None = None
-        self._ssot_swing_mode: str | None = None
-        self._ssot_swing_horizontal_mode: str | None = None
+        # SSOT baselines — single dict keyed by TrackableSetting.
+        # TEMPERATURE baseline is stored here (replaces _last_real_target_temp
+        # for SSOT purposes, but _last_real_target_temp is kept for
+        # non-SSOT temperature tracking in Section B).
+        self._ssot_baselines: dict[TrackableSetting, Any] = {}
+        # Virtual targets for range mode (mirror of _virtual_target_temperature).
+        self._virtual_target_temp_high: float | None = None
+        self._virtual_target_temp_low: float | None = None
         # Active tracked settings — populated in _update_real_temperature_limits
         # based on device capabilities.  Start with core set.
         self._active_tracked_settings: set[TrackableSetting] = set(
@@ -515,25 +518,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             # Only seed from the physical device when we have no restored
             # values AND the device is in a valid (non-unavailable) state.
             if (
-                self._ssot_hvac_mode is None
+                TrackableSetting.HVAC_MODE not in self._ssot_baselines
                 and self._real_state
                 and self._real_state.state
                 not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
             ):
-                self._ssot_hvac_mode = self._real_state.state
-                self._ssot_fan_mode = self._real_state.attributes.get(
-                    "fan_mode"
-                )
-                self._ssot_swing_mode = self._real_state.attributes.get(
-                    "swing_mode"
-                )
-                self._ssot_swing_horizontal_mode = self._real_state.attributes.get(
-                    "swing_horizontal_mode"
-                )
-                if self._last_real_target_temp is None:
-                    self._last_real_target_temp = _coerce_temperature(
-                        self._real_state.attributes.get(ATTR_TEMPERATURE)
-                    )
+                self._seed_ssot_baselines(self._real_state)
         await self._async_subscribe_to_states()
 
     async def _async_subscribe_to_states(self) -> None:
@@ -605,21 +595,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             # where the device was unavailable during init), seed from this
             # first valid event and skip validation — we have nothing to
             # compare against.
-            if self._ssot_hvac_mode is None:
-                self._ssot_hvac_mode = new_state.state
-                self._ssot_fan_mode = new_state.attributes.get("fan_mode")
-                self._ssot_swing_mode = new_state.attributes.get(
-                    "swing_mode"
-                )
-                self._ssot_swing_horizontal_mode = new_state.attributes.get(
-                    "swing_horizontal_mode"
-                )
-                if self._last_real_target_temp is None:
-                    seed_target = _coerce_temperature(
-                        new_state.attributes.get(ATTR_TEMPERATURE)
-                    )
-                    if seed_target is not None:
-                        self._last_real_target_temp = seed_target
+            if TrackableSetting.HVAC_MODE not in self._ssot_baselines:
+                self._seed_ssot_baselines(new_state)
                 _LOGGER.info(
                     "Single source of truth: initialized baseline for %s "
                     "(mode=%s)",
@@ -728,14 +705,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             strict_tolerance = self._pending_request_tolerance()
 
             # Two-tiered matching: strict consumes, loose suppresses.
-            if self._consume_real_target_request(real_target, strict_tolerance):
+            if self._consume_pending_setting_request(TrackableSetting.TEMPERATURE, real_target, strict_tolerance):
                 if ssot_guarding:
                     self._last_real_target_temp = real_target
                 _LOGGER.debug(
                     "Real target %s matched pending request (strict)", real_target
                 )
-            elif self._has_pending_real_target_request(
-                real_target, PENDING_REQUEST_TOLERANCE_MAX
+            elif self._has_pending_setting_request(
+                TrackableSetting.TEMPERATURE, real_target, PENDING_REQUEST_TOLERANCE_MAX
             ):
                 if ssot_guarding:
                     self._last_real_target_temp = real_target
@@ -851,61 +828,35 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         actions.
         """
         changes: list[str] = []
-        new_attrs = new_state.attributes
-
-        # 1. HVAC mode (entity state)
-        if (
-            self._ssot_hvac_mode is not None
-            and new_state.state != self._ssot_hvac_mode
-        ):
-            changes.append(
-                f"hvac_mode {self._ssot_hvac_mode!r} -> {new_state.state!r}"
-            )
-
-        # 2. Temperature attributes – each must move by at most one step
-        #    from the proxy's known-good value.
         step = self._target_temp_step
-        known_temps: dict[str, float | None] = {
-            "temperature": self._last_real_target_temp,
-            # target_temp_high / target_temp_low are not independently
-            # tracked yet, so we can only count them as changed when both
-            # sides are present on the physical device.
-            "target_temp_high": None,
-            "target_temp_low": None,
-        }
-        for attr in _SSOT_TEMPERATURE_ATTRIBUTES:
-            known_good = known_temps.get(attr)
-            new_val = _coerce_temperature(new_attrs.get(attr))
-            if known_good is not None and new_val is not None:
-                temp_diff = abs(new_val - known_good)
-                if temp_diff > 0.01:
-                    if step is not None and temp_diff > step + 0.01:
-                        _LOGGER.debug(
-                            "Single source of truth: %s changed by %.1f "
-                            "from known-good %.1f (max allowed step: %.1f)",
-                            attr,
-                            temp_diff,
-                            known_good,
-                            step,
-                        )
-                        return False
-                    changes.append(f"{attr} {known_good} -> {new_val}")
 
-        # 3. Discrete / enum attributes (fan_mode, swing_mode, …)
-        known_enums: dict[str, str | None] = {
-            "fan_mode": self._ssot_fan_mode,
-            "swing_mode": self._ssot_swing_mode,
-            "swing_horizontal_mode": self._ssot_swing_horizontal_mode,
-        }
-        for attr in _SSOT_ENUM_ATTRIBUTES:
-            known_good = known_enums.get(attr)
-            new_val = new_attrs.get(attr)
-            if (
-                known_good is not None
-                and new_val is not None
-                and known_good != new_val
-            ):
-                changes.append(f"{attr} {known_good!r} -> {new_val!r}")
+        for setting in self._active_tracked_settings:
+            if setting not in self._ssot_settings:
+                continue
+            known_good = self._get_ssot_baseline(setting)
+            incoming = setting.read_from(new_state)
+            if known_good is None or incoming is None:
+                continue
+            if setting.values_match(incoming, known_good):
+                continue
+
+            # Numeric with step: reject jumps larger than one step.
+            if setting.uses_temp_step and step is not None:
+                temp_diff = abs(float(incoming) - float(known_good))
+                if temp_diff > step + 0.01:
+                    _LOGGER.debug(
+                        "Single source of truth: %s changed by %.1f "
+                        "from known-good %.1f (max allowed step: %.1f)",
+                        setting.attr_key,
+                        temp_diff,
+                        known_good,
+                        step,
+                    )
+                    return False
+
+            changes.append(
+                f"{setting.attr_key} {known_good!r} -> {incoming!r}"
+            )
 
         if len(changes) > 1:
             _LOGGER.debug(
@@ -934,181 +885,78 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return
 
         corrections: list[str] = []
+        # Collect range-temp corrections to send in one service call.
+        range_temp_payload: dict[str, float] = {}
 
-        # Correct HVAC mode
-        if self._ssot_hvac_mode:
+        for setting in self._active_tracked_settings:
+            baseline = self._get_ssot_baseline(setting)
+            if baseline is None:
+                continue
+            current = setting.read_from(device_state)
+            if current is None:
+                continue
+            if setting.values_match(current, baseline):
+                continue
+
+            corrections.append(f"{setting.attr_key}={baseline}")
+
+            # Range temps (target_temp_high / target_temp_low) must be
+            # batched into a single set_temperature call.
+            if setting in _RANGE_TEMP_SETTINGS:
+                range_temp_payload[setting.service_attr] = baseline
+                continue
+
+            self._record_setting_request(setting, baseline)
+            self._last_real_write_time = time.monotonic()
             try:
-                current_mode = HVACMode(device_state.state)
-            except ValueError:
-                current_mode = None
+                await self.hass.services.async_call(
+                    CLIMATE_DOMAIN,
+                    setting.service,
+                    {
+                        ATTR_ENTITY_ID: self._real_entity_id,
+                        setting.service_attr: baseline,
+                    },
+                    blocking=True,
+                )
+            except Exception as err:
+                self._remove_pending_setting_request(setting, baseline)
+                _LOGGER.error(
+                    "Single source of truth: failed to correct %s on %s: %s",
+                    setting.attr_key,
+                    self._real_entity_id,
+                    err,
+                )
+
+        # Send grouped range-temp correction if needed.
+        if range_temp_payload:
+            for setting in _RANGE_TEMP_SETTINGS:
+                if setting.service_attr in range_temp_payload:
+                    self._record_setting_request(
+                        setting, range_temp_payload[setting.service_attr]
+                    )
+            self._last_real_write_time = time.monotonic()
             try:
-                desired_mode = HVACMode(self._ssot_hvac_mode)
-            except ValueError:
-                desired_mode = None
-
-            if (
-                desired_mode is not None
-                and current_mode is not None
-                and current_mode != desired_mode
-            ):
-                corrections.append(f"hvac_mode={desired_mode.value}")
-                self._record_setting_request(
-                    TrackableSetting.HVAC_MODE, desired_mode.value
+                await self.hass.services.async_call(
+                    CLIMATE_DOMAIN,
+                    "set_temperature",
+                    {
+                        ATTR_ENTITY_ID: self._real_entity_id,
+                        **range_temp_payload,
+                    },
+                    blocking=True,
                 )
-                self._last_real_write_time = time.monotonic()
-                try:
-                    await self.hass.services.async_call(
-                        CLIMATE_DOMAIN,
-                        SERVICE_SET_HVAC_MODE,
-                        {
-                            ATTR_ENTITY_ID: self._real_entity_id,
-                            ATTR_HVAC_MODE: desired_mode,
-                        },
-                        blocking=True,
-                    )
-                except Exception as err:
-                    _LOGGER.error(
-                        "Single source of truth: failed to correct HVAC mode "
-                        "on %s: %s",
-                        self._real_entity_id,
-                        err,
-                    )
-
-        # Correct target temperature
-        if self._last_real_target_temp is not None:
-            current_target = _coerce_temperature(
-                device_state.attributes.get(ATTR_TEMPERATURE)
-            )
-            if current_target is not None and not math.isclose(
-                current_target, self._last_real_target_temp, abs_tol=0.1
-            ):
-                corrections.append(
-                    f"temperature={self._last_real_target_temp}"
+            except Exception as err:
+                for setting in _RANGE_TEMP_SETTINGS:
+                    if setting.service_attr in range_temp_payload:
+                        self._remove_pending_setting_request(
+                            setting, range_temp_payload[setting.service_attr]
+                        )
+                _LOGGER.error(
+                    "Single source of truth: failed to correct range "
+                    "temperature on %s: %s",
+                    self._real_entity_id,
+                    err,
                 )
-                self._record_real_target_request(self._last_real_target_temp)
-                self._last_real_write_time = time.monotonic()
-                try:
-                    await self.hass.services.async_call(
-                        CLIMATE_DOMAIN,
-                        SERVICE_SET_TEMPERATURE,
-                        {
-                            ATTR_ENTITY_ID: self._real_entity_id,
-                            ATTR_TEMPERATURE: self._last_real_target_temp,
-                        },
-                        blocking=True,
-                    )
-                except Exception as err:
-                    self._remove_real_target_request(
-                        self._last_real_target_temp
-                    )
-                    _LOGGER.error(
-                        "Single source of truth: failed to correct "
-                        "temperature on %s: %s",
-                        self._real_entity_id,
-                        err,
-                    )
-
-        # Correct fan mode
-        if self._ssot_fan_mode is not None:
-            current_fan = device_state.attributes.get("fan_mode")
-            if current_fan is not None and current_fan != self._ssot_fan_mode:
-                from homeassistant.components.climate.const import (
-                    ATTR_FAN_MODE,
-                    SERVICE_SET_FAN_MODE,
-                )
-
-                corrections.append(f"fan_mode={self._ssot_fan_mode}")
-                self._record_setting_request(
-                    TrackableSetting.FAN_MODE, self._ssot_fan_mode
-                )
-                self._last_real_write_time = time.monotonic()
-                try:
-                    await self.hass.services.async_call(
-                        CLIMATE_DOMAIN,
-                        SERVICE_SET_FAN_MODE,
-                        {
-                            ATTR_ENTITY_ID: self._real_entity_id,
-                            ATTR_FAN_MODE: self._ssot_fan_mode,
-                        },
-                        blocking=True,
-                    )
-                except Exception as err:
-                    _LOGGER.error(
-                        "Single source of truth: failed to correct fan mode "
-                        "on %s: %s",
-                        self._real_entity_id,
-                        err,
-                    )
-
-        # Correct swing mode
-        if self._ssot_swing_mode is not None:
-            current_swing = device_state.attributes.get("swing_mode")
-            if (
-                current_swing is not None
-                and current_swing != self._ssot_swing_mode
-            ):
-                from homeassistant.components.climate.const import (
-                    ATTR_SWING_MODE,
-                    SERVICE_SET_SWING_MODE,
-                )
-
-                corrections.append(f"swing_mode={self._ssot_swing_mode}")
-                self._record_setting_request(
-                    TrackableSetting.SWING_MODE, self._ssot_swing_mode
-                )
-                self._last_real_write_time = time.monotonic()
-                try:
-                    await self.hass.services.async_call(
-                        CLIMATE_DOMAIN,
-                        SERVICE_SET_SWING_MODE,
-                        {
-                            ATTR_ENTITY_ID: self._real_entity_id,
-                            ATTR_SWING_MODE: self._ssot_swing_mode,
-                        },
-                        blocking=True,
-                    )
-                except Exception as err:
-                    _LOGGER.error(
-                        "Single source of truth: failed to correct swing "
-                        "mode on %s: %s",
-                        self._real_entity_id,
-                        err,
-                    )
-
-        # Correct swing horizontal mode
-        if self._ssot_swing_horizontal_mode is not None:
-            current_swing_h = device_state.attributes.get("swing_horizontal_mode")
-            if (
-                current_swing_h is not None
-                and current_swing_h != self._ssot_swing_horizontal_mode
-            ):
-                from homeassistant.components.climate.const import (
-                    ATTR_SWING_HORIZONTAL_MODE,
-                    SERVICE_SET_SWING_HORIZONTAL_MODE,
-                )
-
-                corrections.append(f"swing_horizontal_mode={self._ssot_swing_horizontal_mode}")
-                self._record_setting_request(
-                    TrackableSetting.SWING_HORIZONTAL_MODE, self._ssot_swing_horizontal_mode
-                )
-                self._last_real_write_time = time.monotonic()
-                try:
-                    await self.hass.services.async_call(
-                        CLIMATE_DOMAIN,
-                        SERVICE_SET_SWING_HORIZONTAL_MODE,
-                        {
-                            ATTR_ENTITY_ID: self._real_entity_id,
-                            ATTR_SWING_HORIZONTAL_MODE: self._ssot_swing_horizontal_mode,
-                        },
-                        blocking=True,
-                    )
-                except Exception as err:
-                    _LOGGER.error(
-                        "Single source of truth: failed to correct swing "
-                        "horizontal mode on %s: %s",
-                        self._real_entity_id,
-                        err,
-                    )
 
         if corrections:
             await self.hass.services.async_call(
@@ -1196,34 +1044,31 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     # ---- SSOT baseline helpers ----
 
+    def _seed_ssot_baselines(self, state: State) -> None:
+        """Populate all SSOT baselines from a valid device state."""
+        for setting in self._active_tracked_settings:
+            value = setting.read_from(state)
+            if value is not None:
+                self._ssot_baselines[setting] = value
+                if setting == TrackableSetting.TEMPERATURE:
+                    if self._last_real_target_temp is None:
+                        self._last_real_target_temp = value
+
     def _get_ssot_baseline(self, setting: TrackableSetting) -> Any:
         """Return the known-good baseline value for *setting*."""
-        if setting == TrackableSetting.HVAC_MODE:
-            return self._ssot_hvac_mode
         if setting == TrackableSetting.TEMPERATURE:
+            # TEMPERATURE baseline is _last_real_target_temp (shared with
+            # Section B tracking for non-SSOT mode).
             return self._last_real_target_temp
-        if setting == TrackableSetting.FAN_MODE:
-            return self._ssot_fan_mode
-        if setting == TrackableSetting.SWING_MODE:
-            return self._ssot_swing_mode
-        if setting == TrackableSetting.SWING_HORIZONTAL_MODE:
-            return self._ssot_swing_horizontal_mode
-        return None  # Future settings not yet baselined
+        return self._ssot_baselines.get(setting)
 
     def _set_ssot_baseline(
         self, setting: TrackableSetting, value: Any
     ) -> None:
         """Update the known-good baseline for *setting*."""
-        if setting == TrackableSetting.HVAC_MODE:
-            self._ssot_hvac_mode = value
-        elif setting == TrackableSetting.TEMPERATURE:
+        if setting == TrackableSetting.TEMPERATURE:
             self._last_real_target_temp = value
-        elif setting == TrackableSetting.FAN_MODE:
-            self._ssot_fan_mode = value
-        elif setting == TrackableSetting.SWING_MODE:
-            self._ssot_swing_mode = value
-        elif setting == TrackableSetting.SWING_HORIZONTAL_MODE:
-            self._ssot_swing_horizontal_mode = value
+        self._ssot_baselines[setting] = value
 
     # ---- Deterministic echo detection ----
 
@@ -1253,57 +1098,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if incoming is not None:
                 self._consume_pending_setting_request(setting, incoming)
 
-    # ---- Backward-compat thin wrappers for temperature pending requests ----
-    # These delegate to the generic system so that Section B (target temperature
-    # tracking with strict/loose tolerance) continues to work unchanged.
-
-    @property
-    def _last_requested_real_target(self) -> float | None:
-        requests = self._pending_setting_requests.get(
-            TrackableSetting.TEMPERATURE, []
-        )
-        return requests[-1][0] if requests else None
-
-    @_last_requested_real_target.setter
-    def _last_requested_real_target(self, value: float | None) -> None:
-        pass  # No-op: now derived from pending requests list
-
-    def _record_real_target_request(self, real_target: float) -> None:
-        """Track target values we have explicitly requested from the thermostat."""
-        self._record_setting_request(TrackableSetting.TEMPERATURE, real_target)
-
     def _pending_request_tolerance(self) -> float:
         """Return the tolerance used when matching pending requests."""
         precision = self.precision or DEFAULT_PRECISION
         return max(
             PENDING_REQUEST_TOLERANCE_MIN,
             min(PENDING_REQUEST_TOLERANCE_MAX, precision / 2),
-        )
-
-    def _remove_real_target_request(self, real_target: float) -> None:
-        """Remove a pending request after failures so we don't ignore real updates."""
-        self._remove_pending_setting_request(
-            TrackableSetting.TEMPERATURE, real_target
-        )
-
-    def _cleanup_expired_pending_requests(self) -> None:
-        """Remove pending requests older than PENDING_REQUEST_TIMEOUT."""
-        self._cleanup_pending_requests(TrackableSetting.TEMPERATURE)
-
-    def _consume_real_target_request(
-        self, real_target: float, tolerance: float
-    ) -> bool:
-        """Return True if a state update matches one of our pending requests."""
-        return self._consume_pending_setting_request(
-            TrackableSetting.TEMPERATURE, real_target, tolerance
-        )
-
-    def _has_pending_real_target_request(
-        self, real_target: float, tolerance: float
-    ) -> bool:
-        """Return True if we've already asked the thermostat for this target."""
-        return self._has_pending_setting_request(
-            TrackableSetting.TEMPERATURE, real_target, tolerance
         )
 
     def _discover_temperature_unit(self) -> str:
@@ -1445,14 +1245,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def target_temperature_high(self) -> float | None:
-        """Return the high target temperature for range mode."""
+        """Return the high target temperature for range mode (virtual)."""
+        if self._virtual_target_temp_high is not None:
+            return self._virtual_target_temp_high
         if not self._real_state:
             return None
         return _coerce_temperature(self._real_state.attributes.get("target_temp_high"))
 
     @property
     def target_temperature_low(self) -> float | None:
-        """Return the low target temperature for range mode."""
+        """Return the low target temperature for range mode (virtual)."""
+        if self._virtual_target_temp_low is not None:
+            return self._virtual_target_temp_low
         if not self._real_state:
             return None
         return _coerce_temperature(self._real_state.attributes.get("target_temp_low"))
@@ -1460,6 +1264,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     @property
     def target_humidity(self) -> float | None:
         """Return the target humidity from the real thermostat."""
+        baseline = self._ssot_baselines.get(TrackableSetting.TARGET_HUMIDITY)
+        if TrackableSetting.TARGET_HUMIDITY in self._it_settings and baseline is not None:
+            return baseline
         if not self._real_state:
             return None
         val = self._real_state.attributes.get("humidity")
@@ -1496,9 +1303,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def hvac_mode(self) -> HVACMode | None:
-        if TrackableSetting.HVAC_MODE in self._it_settings and self._ssot_hvac_mode is not None:
+        baseline = self._ssot_baselines.get(TrackableSetting.HVAC_MODE)
+        if TrackableSetting.HVAC_MODE in self._it_settings and baseline is not None:
             try:
-                return HVACMode(self._ssot_hvac_mode)
+                return HVACMode(baseline)
             except ValueError:
                 pass
         if self._real_state:
@@ -1585,10 +1393,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             }
         )
         if self._single_source_of_truth:
-            attrs[ATTR_SSOT_HVAC_MODE] = self._ssot_hvac_mode
-            attrs[ATTR_SSOT_FAN_MODE] = self._ssot_fan_mode
-            attrs[ATTR_SSOT_SWING_MODE] = self._ssot_swing_mode
-            attrs[ATTR_SSOT_SWING_HORIZONTAL_MODE] = self._ssot_swing_horizontal_mode
+            for setting in self._active_tracked_settings:
+                attr_name = f"ssot_{setting.attr_key}"
+                attrs[attr_name] = self._ssot_baselines.get(setting)
             attrs[ATTR_IGNORE_THERMOSTAT] = self._ignore_thermostat
         return attrs
 
@@ -1642,8 +1449,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 if result_high is None or result_low is None:
                     return
 
-                _, real_high, _, _ = result_high
-                _, real_low, _, _ = result_low
+                constrained_high, real_high, _, _ = result_high
+                constrained_low, real_low, _, _ = result_low
 
                 payload: dict[str, Any] = {
                     ATTR_ENTITY_ID: self._real_entity_id,
@@ -1655,6 +1462,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
                 self._record_setting_request(TrackableSetting.TARGET_TEMP_HIGH, real_high)
                 self._record_setting_request(TrackableSetting.TARGET_TEMP_LOW, real_low)
+                if self._single_source_of_truth:
+                    self._ssot_baselines[TrackableSetting.TARGET_TEMP_HIGH] = real_high
+                    self._ssot_baselines[TrackableSetting.TARGET_TEMP_LOW] = real_low
                 self._last_real_write_time = time.monotonic()
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
@@ -1662,6 +1472,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     payload,
                     blocking=True,
                 )
+                self._virtual_target_temp_high = constrained_high
+                self._virtual_target_temp_low = constrained_low
                 self.async_write_ha_state()
                 return
 
@@ -1697,7 +1509,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 real_current=real_current,
                 actor_name=actor_name,
             )
-            self._record_real_target_request(real_target)
+            self._record_setting_request(TrackableSetting.TEMPERATURE, real_target)
             try:
                 # Optimistic update to prevent race conditions (echo events)
                 previous_state = (
@@ -1723,7 +1535,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_write_time,
                     self._suppress_sync_logs_until,
                 ) = previous_state
-                self._remove_real_target_request(real_target)
+                self._remove_pending_setting_request(TrackableSetting.TEMPERATURE, real_target)
                 raise
 
             self._virtual_target_temperature = constrained_target
@@ -1731,7 +1543,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if self._single_source_of_truth:
-            self._ssot_hvac_mode = hvac_mode
+            self._ssot_baselines[TrackableSetting.HVAC_MODE] = hvac_mode
         # Always record for echo detection.
         self._record_setting_request(TrackableSetting.HVAC_MODE, hvac_mode)
         self._last_real_write_time = time.monotonic()
@@ -1753,7 +1565,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
         if self._single_source_of_truth:
-            self._ssot_fan_mode = fan_mode
+            self._ssot_baselines[TrackableSetting.FAN_MODE] = fan_mode
         self._record_setting_request(TrackableSetting.FAN_MODE, fan_mode)
         self._last_real_write_time = time.monotonic()
         await self.hass.services.async_call(
@@ -1774,7 +1586,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
         if self._single_source_of_truth:
-            self._ssot_swing_mode = swing_mode
+            self._ssot_baselines[TrackableSetting.SWING_MODE] = swing_mode
         self._record_setting_request(TrackableSetting.SWING_MODE, swing_mode)
         self._last_real_write_time = time.monotonic()
         await self.hass.services.async_call(
@@ -1793,6 +1605,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             SERVICE_SET_HUMIDITY,
         )
 
+        if self._single_source_of_truth:
+            self._ssot_baselines[TrackableSetting.TARGET_HUMIDITY] = float(humidity)
         self._record_setting_request(TrackableSetting.TARGET_HUMIDITY, float(humidity))
         self._last_real_write_time = time.monotonic()
         await self.hass.services.async_call(
@@ -1813,7 +1627,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
         if self._single_source_of_truth:
-            self._ssot_swing_horizontal_mode = swing_horizontal_mode
+            self._ssot_baselines[TrackableSetting.SWING_HORIZONTAL_MODE] = swing_horizontal_mode
         self._record_setting_request(TrackableSetting.SWING_HORIZONTAL_MODE, swing_horizontal_mode)
         self._last_real_write_time = time.monotonic()
         await self.hass.services.async_call(
@@ -2087,7 +1901,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return
             
             pending_tolerance = self._pending_request_tolerance()
-            if self._has_pending_real_target_request(desired_real_target, pending_tolerance):
+            if self._has_pending_setting_request(TrackableSetting.TEMPERATURE, desired_real_target, pending_tolerance):
                 return
 
             reason = "sensor realignment" + (" (overdrive)" if overdrive_active else "")
@@ -2103,7 +1917,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 actor_name=None,
                 overdrive_adjust=overdrive_adjust if overdrive_active else None,
             )
-            self._record_real_target_request(desired_real_target)
+            self._record_setting_request(TrackableSetting.TEMPERATURE, desired_real_target)
             try:
                 # Optimistic update to prevent race conditions (echo events)
                 previous_state = (
@@ -2132,7 +1946,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_write_time,
                     self._suppress_sync_logs_until,
                 ) = previous_state
-                self._remove_real_target_request(desired_real_target)
+                self._remove_pending_setting_request(TrackableSetting.TEMPERATURE, desired_real_target)
                 
                 if "502" in str(err) or "Bad Gateway" in str(err):
                     _LOGGER.warning(
@@ -2182,18 +1996,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._last_real_target_temp = restored_real
 
         if self._single_source_of_truth:
-            restored_ssot_hvac = last_state.attributes.get(ATTR_SSOT_HVAC_MODE)
-            if restored_ssot_hvac is not None:
-                self._ssot_hvac_mode = restored_ssot_hvac
-            restored_ssot_fan = last_state.attributes.get(ATTR_SSOT_FAN_MODE)
-            if restored_ssot_fan is not None:
-                self._ssot_fan_mode = restored_ssot_fan
-            restored_ssot_swing = last_state.attributes.get(ATTR_SSOT_SWING_MODE)
-            if restored_ssot_swing is not None:
-                self._ssot_swing_mode = restored_ssot_swing
-            restored_ssot_swing_h = last_state.attributes.get(ATTR_SSOT_SWING_HORIZONTAL_MODE)
-            if restored_ssot_swing_h is not None:
-                self._ssot_swing_horizontal_mode = restored_ssot_swing_h
+            for setting in TrackableSetting:
+                attr_name = f"ssot_{setting.attr_key}"
+                restored = last_state.attributes.get(attr_name)
+                if restored is not None:
+                    self._ssot_baselines[setting] = restored
 
     def _update_real_temperature_limits(self) -> None:
         if not self._real_state:
@@ -2558,8 +2365,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     @property
     def fan_mode(self) -> str | None:
         """Return the fan setting."""
-        if TrackableSetting.FAN_MODE in self._it_settings and self._ssot_fan_mode is not None:
-            return self._ssot_fan_mode
+        baseline = self._ssot_baselines.get(TrackableSetting.FAN_MODE)
+        if TrackableSetting.FAN_MODE in self._it_settings and baseline is not None:
+            return baseline
         if self._real_state:
             return self._real_state.attributes.get("fan_mode")
         return None
@@ -2574,8 +2382,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     @property
     def swing_mode(self) -> str | None:
         """Return the swing setting."""
-        if TrackableSetting.SWING_MODE in self._it_settings and self._ssot_swing_mode is not None:
-            return self._ssot_swing_mode
+        baseline = self._ssot_baselines.get(TrackableSetting.SWING_MODE)
+        if TrackableSetting.SWING_MODE in self._it_settings and baseline is not None:
+            return baseline
         if self._real_state:
             return self._real_state.attributes.get("swing_mode")
         return None
@@ -2590,8 +2399,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     @property
     def swing_horizontal_mode(self) -> str | None:
         """Return the horizontal swing setting."""
-        if TrackableSetting.SWING_HORIZONTAL_MODE in self._it_settings and self._ssot_swing_horizontal_mode is not None:
-            return self._ssot_swing_horizontal_mode
+        baseline = self._ssot_baselines.get(TrackableSetting.SWING_HORIZONTAL_MODE)
+        if TrackableSetting.SWING_HORIZONTAL_MODE in self._it_settings and baseline is not None:
+            return baseline
         if self._real_state:
             return self._real_state.attributes.get("swing_horizontal_mode")
         return None

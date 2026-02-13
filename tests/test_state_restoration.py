@@ -12,9 +12,6 @@ from custom_components.thermostat_proxy.climate import TrackableSetting
 from custom_components.thermostat_proxy.const import (
     ATTR_ACTIVE_SENSOR,
     ATTR_REAL_TARGET_TEMPERATURE,
-    ATTR_SSOT_FAN_MODE,
-    ATTR_SSOT_HVAC_MODE,
-    ATTR_SSOT_SWING_MODE,
 )
 from homeassistant.const import ATTR_TEMPERATURE
 
@@ -37,12 +34,13 @@ def _last_state(
         attrs[ATTR_TEMPERATURE] = temperature
     if real_target is not None:
         attrs[ATTR_REAL_TARGET_TEMPERATURE] = real_target
+    # Use the generic ssot_{attr_key} format for baselines
     if ssot_hvac is not None:
-        attrs[ATTR_SSOT_HVAC_MODE] = ssot_hvac
+        attrs["ssot_hvac_mode"] = ssot_hvac
     if ssot_fan is not None:
-        attrs[ATTR_SSOT_FAN_MODE] = ssot_fan
+        attrs["ssot_fan_mode"] = ssot_fan
     if ssot_swing is not None:
-        attrs[ATTR_SSOT_SWING_MODE] = ssot_swing
+        attrs["ssot_swing_mode"] = ssot_swing
     return State("climate.test_proxy", "heat", attrs)
 
 
@@ -105,15 +103,15 @@ class TestRestoreSSOTBaselines:
         )
         with patch.object(entity, "async_get_last_state", return_value=last):
             await entity._async_restore_state()
-        assert entity._ssot_hvac_mode == "cool"
-        assert entity._ssot_fan_mode == "high"
-        assert entity._ssot_swing_mode == "on"
+        assert entity._ssot_baselines.get(TrackableSetting.HVAC_MODE) == "cool"
+        assert entity._ssot_baselines.get(TrackableSetting.FAN_MODE) == "high"
+        assert entity._ssot_baselines.get(TrackableSetting.SWING_MODE) == "on"
 
     async def test_no_restore_when_ssot_disabled(self, hass, make_entity) -> None:
         entity = make_entity()  # No SSOT
         last = _last_state(ssot_hvac="cool", ssot_fan="high")
         with patch.object(entity, "async_get_last_state", return_value=last):
             await entity._async_restore_state()
-        # Baselines should remain None when SSOT is off
-        assert entity._ssot_hvac_mode is None
-        assert entity._ssot_fan_mode is None
+        # Baselines should remain empty when SSOT is off
+        assert TrackableSetting.HVAC_MODE not in entity._ssot_baselines
+        assert TrackableSetting.FAN_MODE not in entity._ssot_baselines

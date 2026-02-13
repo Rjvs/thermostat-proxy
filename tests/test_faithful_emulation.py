@@ -314,13 +314,13 @@ class TestServiceForwarding:
         ent = make_entity(
             ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode", "swing_horizontal_mode"],
         )
-        ent._ssot_swing_horizontal_mode = "off"
+        ent._ssot_baselines[TrackableSetting.SWING_HORIZONTAL_MODE] = "off"
         _seed_entity(hass, ent)
 
         with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
             await ent.async_set_swing_horizontal_mode("horizontal")
 
-        assert ent._ssot_swing_horizontal_mode == "horizontal"
+        assert ent._ssot_baselines[TrackableSetting.SWING_HORIZONTAL_MODE] == "horizontal"
 
     async def test_turn_on_forwards(
         self, hass: HomeAssistant, make_entity
@@ -370,7 +370,7 @@ class TestSwingHorizontalModeITOverride:
         self, hass: HomeAssistant, make_entity
     ) -> None:
         ent = make_entity(it_settings=["swing_horizontal_mode"])
-        ent._ssot_swing_horizontal_mode = "horizontal"
+        ent._ssot_baselines[TrackableSetting.SWING_HORIZONTAL_MODE] = "horizontal"
         state = _make_full_state(swing_horizontal_mode="off")
         _seed_entity(hass, ent, state)
 
@@ -380,7 +380,7 @@ class TestSwingHorizontalModeITOverride:
         self, hass: HomeAssistant, make_entity
     ) -> None:
         ent = make_entity()
-        ent._ssot_swing_horizontal_mode = "horizontal"
+        ent._ssot_baselines[TrackableSetting.SWING_HORIZONTAL_MODE] = "horizontal"
         state = _make_full_state(swing_horizontal_mode="off")
         _seed_entity(hass, ent, state)
 
