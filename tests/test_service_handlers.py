@@ -343,3 +343,60 @@ class TestSetPresetMode:
         """Selecting an unknown preset should raise ValueError."""
         with pytest.raises(ValueError, match="Unknown preset"):
             await entity.async_set_preset_mode("Nonexistent Room")
+
+
+# ── _async_forward_setting rollback ──────────────────────────────────
+
+
+class TestForwardSettingRollback:
+    """_async_forward_setting rolls back SSOT baseline on service call failure."""
+
+    async def test_rollback_ssot_baseline_on_failure(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        """When the service call fails, the SSOT baseline should revert."""
+        ent = make_entity(
+            ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
+        )
+        ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
+
+        with patch(
+            PATCH_ASYNC_CALL,
+            side_effect=RuntimeError("Service call failed"),
+        ):
+            with pytest.raises(RuntimeError, match="Service call failed"):
+                await ent.async_set_fan_mode("high")
+
+        # SSOT baseline should be rolled back to "auto"
+        assert ent._ssot_baselines.get(TrackableSetting.FAN_MODE) == "auto"
+
+    async def test_rollback_write_time_on_failure(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        """When the service call fails, _last_real_write_time should revert."""
+        ent = make_entity(
+            ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
+        )
+        ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
+        original_write_time = ent._last_real_write_time
+
+        with patch(
+            PATCH_ASYNC_CALL,
+            side_effect=RuntimeError("Service call failed"),
+        ):
+            with pytest.raises(RuntimeError, match="Service call failed"):
+                await ent.async_set_fan_mode("high")
+
+        assert ent._last_real_write_time == original_write_time
+
+    async def test_no_rollback_without_ssot(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        """Without SSOT, no SSOT baseline should exist to roll back."""
+        ent = make_entity()  # No SSOT
+
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
+            await ent.async_set_fan_mode("high")
+
+        # Baseline should remain None (no SSOT)
+        assert ent._ssot_baselines.get(TrackableSetting.FAN_MODE) is None

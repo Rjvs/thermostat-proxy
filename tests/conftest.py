@@ -171,3 +171,49 @@ def make_entity(hass: HomeAssistant):
         return entity
 
     return _make
+
+
+# ── Shared test helpers ────────────────────────────────────────────────
+
+
+def make_simple_state(
+    hvac: str = "heat",
+    temperature: float = 22.0,
+    fan_mode: str | None = "auto",
+    swing_mode: str | None = "off",
+    **extra: Any,
+) -> State:
+    """Build a physical thermostat State for SSOT/echo/validation tests."""
+    attrs: dict[str, Any] = {"temperature": temperature, **extra}
+    if fan_mode is not None:
+        attrs["fan_mode"] = fan_mode
+    if swing_mode is not None:
+        attrs["swing_mode"] = swing_mode
+    return State(REAL_THERMOSTAT_ENTITY, hvac, attrs)
+
+
+def seed_core_baselines(
+    entity: CustomThermostatEntity,
+    hvac: str = "heat",
+    temperature: float = 22.0,
+    fan_mode: str = "auto",
+    swing_mode: str = "off",
+) -> None:
+    """Seed the 4 core SSOT baselines and active tracked settings."""
+    entity._ssot_baselines[TrackableSetting.HVAC_MODE] = hvac
+    entity._last_real_target_temp = temperature
+    entity._ssot_baselines[TrackableSetting.FAN_MODE] = fan_mode
+    entity._ssot_baselines[TrackableSetting.SWING_MODE] = swing_mode
+    entity._active_tracked_settings = {
+        TrackableSetting.HVAC_MODE,
+        TrackableSetting.TEMPERATURE,
+        TrackableSetting.FAN_MODE,
+        TrackableSetting.SWING_MODE,
+    }
+
+
+def get_service_call_data(mock_call: Any, key: str | None = None) -> Any:
+    """Extract service call data dict from a patched ServiceRegistry.async_call."""
+    args = mock_call.call_args[0]
+    data = next(a for a in args if isinstance(a, dict))
+    return data.get(key) if key is not None else data

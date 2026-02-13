@@ -12,28 +12,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from homeassistant.components.climate.const import HVACMode
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import HomeAssistant
 
 from custom_components.thermostat_proxy.climate import (
     TrackableSetting,
 )
 
-from .conftest import REAL_THERMOSTAT_ENTITY
-
-
-def _state(
-    hvac: str = "heat",
-    temperature: float = 22.0,
-    fan_mode: str | None = "auto",
-    swing_mode: str | None = "off",
-    **extra,
-) -> State:
-    attrs: dict = {"temperature": temperature, **extra}
-    if fan_mode is not None:
-        attrs["fan_mode"] = fan_mode
-    if swing_mode is not None:
-        attrs["swing_mode"] = swing_mode
-    return State(REAL_THERMOSTAT_ENTITY, hvac, attrs)
+from .conftest import make_simple_state as _state, seed_core_baselines
 
 
 # ── Baseline seeding ──────────────────────────────────────────────────
@@ -81,17 +66,8 @@ class TestSSOTChangeValidation:
         ent = make_entity(
             ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
         )
-        ent._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
-        ent._last_real_target_temp = 22.0
-        ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
-        ent._ssot_baselines[TrackableSetting.SWING_MODE] = "off"
+        seed_core_baselines(ent)
         ent._target_temp_step = 0.5
-        ent._active_tracked_settings = {
-            TrackableSetting.HVAC_MODE,
-            TrackableSetting.TEMPERATURE,
-            TrackableSetting.FAN_MODE,
-            TrackableSetting.SWING_MODE,
-        }
         return ent
 
     def test_accepts_single_temp_step(self, entity) -> None:
@@ -127,16 +103,7 @@ class TestITBlocking:
             it_settings=["hvac_mode"],
             ssot_settings=["temperature"],
         )
-        ent._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
-        ent._last_real_target_temp = 22.0
-        ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
-        ent._ssot_baselines[TrackableSetting.SWING_MODE] = "off"
-        ent._active_tracked_settings = {
-            TrackableSetting.HVAC_MODE,
-            TrackableSetting.TEMPERATURE,
-            TrackableSetting.FAN_MODE,
-            TrackableSetting.SWING_MODE,
-        }
+        seed_core_baselines(ent)
         return ent
 
     def test_it_setting_in_it_settings(self, entity) -> None:
@@ -195,16 +162,7 @@ class TestUntrackedSettingsPassThrough:
         entity = make_entity(
             ssot_settings=["hvac_mode"],  # Only HVAC is SSOT-tracked
         )
-        entity._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
-        entity._last_real_target_temp = 22.0
-        entity._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
-        entity._ssot_baselines[TrackableSetting.SWING_MODE] = "off"
-        entity._active_tracked_settings = {
-            TrackableSetting.HVAC_MODE,
-            TrackableSetting.TEMPERATURE,
-            TrackableSetting.FAN_MODE,
-            TrackableSetting.SWING_MODE,
-        }
+        seed_core_baselines(entity)
 
         # Temperature jumps by 5° — but temperature is NOT SSOT-tracked
         new = _state(hvac="heat", temperature=27.0, fan_mode="auto", swing_mode="off")

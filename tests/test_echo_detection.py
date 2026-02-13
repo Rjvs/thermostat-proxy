@@ -4,29 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import HomeAssistant
 
 from custom_components.thermostat_proxy.climate import (
     TrackableSetting,
     _CORE_TRACKED_SETTINGS,
 )
 
-from .conftest import REAL_THERMOSTAT_ENTITY
-
-
-def _state(
-    hvac: str = "heat",
-    temperature: float = 22.0,
-    fan_mode: str | None = "auto",
-    swing_mode: str | None = "off",
-) -> State:
-    """Build a physical thermostat State for echo detection tests."""
-    attrs: dict = {"temperature": temperature}
-    if fan_mode is not None:
-        attrs["fan_mode"] = fan_mode
-    if swing_mode is not None:
-        attrs["swing_mode"] = swing_mode
-    return State(REAL_THERMOSTAT_ENTITY, hvac, attrs)
+from .conftest import make_simple_state as _state, seed_core_baselines
 
 
 @pytest.fixture
@@ -35,18 +20,7 @@ def entity(hass: HomeAssistant, make_entity):
     ent = make_entity(
         ssot_settings=["hvac_mode", "temperature", "fan_mode", "swing_mode"],
     )
-    # Seed baselines so echo detection has something to compare against.
-    ent._ssot_baselines[TrackableSetting.HVAC_MODE] = "heat"
-    ent._last_real_target_temp = 22.0
-    ent._ssot_baselines[TrackableSetting.FAN_MODE] = "auto"
-    ent._ssot_baselines[TrackableSetting.SWING_MODE] = "off"
-    # Ensure all four settings are active.
-    ent._active_tracked_settings = {
-        TrackableSetting.HVAC_MODE,
-        TrackableSetting.TEMPERATURE,
-        TrackableSetting.FAN_MODE,
-        TrackableSetting.SWING_MODE,
-    }
+    seed_core_baselines(ent)
     return ent
 
 

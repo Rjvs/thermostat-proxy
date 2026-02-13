@@ -6,10 +6,14 @@ import pytest
 
 from homeassistant.core import State
 
+from homeassistant.components.climate.const import ClimateEntityFeature
+
 from custom_components.thermostat_proxy.climate import (
     PENDING_REQUEST_TOLERANCE_MAX,
     TrackableSetting,
     _CORRECTION_GROUPS,
+    _FEATURE_TO_SETTINGS,
+    _PASSTHROUGH_FEATURES,
     _SSOT_EXPORTABLE_SETTINGS,
     _TRACKABLE_SETTING_BY_KEY,
 )
@@ -182,3 +186,80 @@ class TestMetadataFields:
         """TARGET_TEMP_HIGH and TARGET_TEMP_LOW both use set_temperature."""
         assert TrackableSetting.TARGET_TEMP_HIGH.service_name == "set_temperature"
         assert TrackableSetting.TARGET_TEMP_LOW.service_name == "set_temperature"
+
+
+# ── feature_flag and label fields ────────────────────────────────────
+
+
+class TestFeatureFlagAndLabel:
+    """TrackableSetting.feature_flag and .label are correctly set."""
+
+    def test_core_settings_have_no_feature_flag(self) -> None:
+        """HVAC_MODE and TEMPERATURE are always active (no feature flag)."""
+        assert TrackableSetting.HVAC_MODE.feature_flag is None
+        assert TrackableSetting.TEMPERATURE.feature_flag is None
+
+    def test_optional_settings_have_feature_flag(self) -> None:
+        """Non-core settings have a ClimateEntityFeature flag."""
+        for setting in TrackableSetting:
+            if setting in (TrackableSetting.HVAC_MODE, TrackableSetting.TEMPERATURE):
+                continue
+            assert setting.feature_flag is not None, (
+                f"{setting.name} should have a feature_flag"
+            )
+
+    def test_target_temp_range_shares_flag(self) -> None:
+        """TARGET_TEMP_HIGH and TARGET_TEMP_LOW share TARGET_TEMPERATURE_RANGE."""
+        assert (
+            TrackableSetting.TARGET_TEMP_HIGH.feature_flag
+            == ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+        )
+        assert (
+            TrackableSetting.TARGET_TEMP_LOW.feature_flag
+            == ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+        )
+
+    def test_every_setting_has_label(self) -> None:
+        """Every setting has a non-empty human-readable label."""
+        for setting in TrackableSetting:
+            assert setting.label, f"{setting.name} missing label"
+
+    def test_label_values(self) -> None:
+        """Spot-check a few label values."""
+        assert TrackableSetting.HVAC_MODE.label == "HVAC mode"
+        assert TrackableSetting.FAN_MODE.label == "Fan mode"
+        assert TrackableSetting.TARGET_HUMIDITY.label == "Target humidity"
+
+
+# ── _FEATURE_TO_SETTINGS and _PASSTHROUGH_FEATURES ──────────────────
+
+
+class TestFeatureMappings:
+    """Module-level feature flag mapping lookups."""
+
+    def test_feature_to_settings_covers_all_optional(self) -> None:
+        """Every optional setting appears in _FEATURE_TO_SETTINGS values."""
+        all_mapped = set()
+        for settings in _FEATURE_TO_SETTINGS.values():
+            all_mapped.update(settings)
+        for setting in TrackableSetting:
+            if setting.feature_flag is not None:
+                assert setting in all_mapped, f"{setting.name} not in _FEATURE_TO_SETTINGS"
+
+    def test_target_temp_range_maps_two_settings(self) -> None:
+        """TARGET_TEMPERATURE_RANGE maps to both HIGH and LOW."""
+        settings = _FEATURE_TO_SETTINGS[ClimateEntityFeature.TARGET_TEMPERATURE_RANGE]
+        assert TrackableSetting.TARGET_TEMP_HIGH in settings
+        assert TrackableSetting.TARGET_TEMP_LOW in settings
+        assert len(settings) == 2
+
+    def test_passthrough_features(self) -> None:
+        """TURN_ON and TURN_OFF are passthrough (no TrackableSetting)."""
+        assert ClimateEntityFeature.TURN_ON in _PASSTHROUGH_FEATURES
+        assert ClimateEntityFeature.TURN_OFF in _PASSTHROUGH_FEATURES
+        assert len(_PASSTHROUGH_FEATURES) == 2
+
+    def test_no_overlap_feature_and_passthrough(self) -> None:
+        """Feature-mapped flags and passthrough flags should not overlap."""
+        feature_flags = set(_FEATURE_TO_SETTINGS.keys())
+        assert not feature_flags & _PASSTHROUGH_FEATURES

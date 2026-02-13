@@ -360,112 +360,47 @@ class TestServiceForwarding:
             )
 
 
-# ── IT override for swing_horizontal_mode ─────────────────────────────
+# ── Parametrized IT overrides for optional settings ──────────────────
+
+# (it_key, setting, baseline_val, state_kwarg, real_val, prop_name, expected_real)
+_IT_OVERRIDE_CASES = [
+    ("swing_horizontal_mode", TrackableSetting.SWING_HORIZONTAL_MODE, "horizontal", {"swing_horizontal_mode": "off"}, "swing_horizontal_mode", "off"),
+    ("target_temp_high", TrackableSetting.TARGET_TEMP_HIGH, 28.0, {"target_temp_high": 25.0}, "target_temperature_high", 25.0),
+    ("target_temp_low", TrackableSetting.TARGET_TEMP_LOW, 16.0, {"target_temp_low": 18.0}, "target_temperature_low", 18.0),
+    ("target_humidity", TrackableSetting.TARGET_HUMIDITY, 60.0, {"humidity": 45}, "target_humidity", 45),
+]
 
 
-class TestSwingHorizontalModeITOverride:
-    """When IT locks swing_horizontal_mode, the proxy shows its own baseline."""
+class TestITOverrideParametrized:
+    """IT-locked settings return the proxy's baseline; otherwise the real value."""
 
+    @pytest.mark.parametrize(
+        "it_key,setting,baseline,state_kwargs,prop_name,expected_real",
+        _IT_OVERRIDE_CASES,
+        ids=[c[0] for c in _IT_OVERRIDE_CASES],
+    )
     def test_it_returns_baseline(
-        self, hass: HomeAssistant, make_entity
+        self, hass, make_entity,
+        it_key, setting, baseline, state_kwargs, prop_name, expected_real,
     ) -> None:
-        ent = make_entity(it_settings=["swing_horizontal_mode"])
-        ent._ssot_baselines[TrackableSetting.SWING_HORIZONTAL_MODE] = "horizontal"
-        state = _make_full_state(swing_horizontal_mode="off")
-        _seed_entity(hass, ent, state)
+        ent = make_entity(it_settings=[it_key])
+        ent._ssot_baselines[setting] = baseline
+        _seed_entity(hass, ent, _make_full_state(**state_kwargs))
+        assert getattr(ent, prop_name) == baseline
 
-        assert ent.swing_horizontal_mode == "horizontal"
-
+    @pytest.mark.parametrize(
+        "it_key,setting,baseline,state_kwargs,prop_name,expected_real",
+        _IT_OVERRIDE_CASES,
+        ids=[c[0] for c in _IT_OVERRIDE_CASES],
+    )
     def test_without_it_returns_real(
-        self, hass: HomeAssistant, make_entity
+        self, hass, make_entity,
+        it_key, setting, baseline, state_kwargs, prop_name, expected_real,
     ) -> None:
         ent = make_entity()
-        ent._ssot_baselines[TrackableSetting.SWING_HORIZONTAL_MODE] = "horizontal"
-        state = _make_full_state(swing_horizontal_mode="off")
-        _seed_entity(hass, ent, state)
-
-        assert ent.swing_horizontal_mode == "off"
-
-
-# ── IT override for target_temperature_high ──────────────────────────
-
-
-class TestTargetTempHighITOverride:
-    """When IT locks target_temp_high, the proxy shows its own baseline."""
-
-    def test_it_returns_baseline(
-        self, hass: HomeAssistant, make_entity
-    ) -> None:
-        ent = make_entity(it_settings=["target_temp_high"])
-        ent._ssot_baselines[TrackableSetting.TARGET_TEMP_HIGH] = 28.0
-        state = _make_full_state(target_temp_high=25.0)
-        _seed_entity(hass, ent, state)
-
-        assert ent.target_temperature_high == 28.0
-
-    def test_without_it_returns_real(
-        self, hass: HomeAssistant, make_entity
-    ) -> None:
-        ent = make_entity()
-        ent._ssot_baselines[TrackableSetting.TARGET_TEMP_HIGH] = 28.0
-        state = _make_full_state(target_temp_high=25.0)
-        _seed_entity(hass, ent, state)
-
-        assert ent.target_temperature_high == 25.0
-
-
-# ── IT override for target_temperature_low ───────────────────────────
-
-
-class TestTargetTempLowITOverride:
-    """When IT locks target_temp_low, the proxy shows its own baseline."""
-
-    def test_it_returns_baseline(
-        self, hass: HomeAssistant, make_entity
-    ) -> None:
-        ent = make_entity(it_settings=["target_temp_low"])
-        ent._ssot_baselines[TrackableSetting.TARGET_TEMP_LOW] = 16.0
-        state = _make_full_state(target_temp_low=18.0)
-        _seed_entity(hass, ent, state)
-
-        assert ent.target_temperature_low == 16.0
-
-    def test_without_it_returns_real(
-        self, hass: HomeAssistant, make_entity
-    ) -> None:
-        ent = make_entity()
-        ent._ssot_baselines[TrackableSetting.TARGET_TEMP_LOW] = 16.0
-        state = _make_full_state(target_temp_low=18.0)
-        _seed_entity(hass, ent, state)
-
-        assert ent.target_temperature_low == 18.0
-
-
-# ── IT override for target_humidity ──────────────────────────────────
-
-
-class TestTargetHumidityITOverride:
-    """When IT locks target_humidity, the proxy shows its own baseline."""
-
-    def test_it_returns_baseline(
-        self, hass: HomeAssistant, make_entity
-    ) -> None:
-        ent = make_entity(it_settings=["target_humidity"])
-        ent._ssot_baselines[TrackableSetting.TARGET_HUMIDITY] = 60.0
-        state = _make_full_state(humidity=45)
-        _seed_entity(hass, ent, state)
-
-        assert ent.target_humidity == 60.0
-
-    def test_without_it_returns_real(
-        self, hass: HomeAssistant, make_entity
-    ) -> None:
-        ent = make_entity()
-        ent._ssot_baselines[TrackableSetting.TARGET_HUMIDITY] = 60.0
-        state = _make_full_state(humidity=45)
-        _seed_entity(hass, ent, state)
-
-        assert ent.target_humidity == 45
+        ent._ssot_baselines[setting] = baseline
+        _seed_entity(hass, ent, _make_full_state(**state_kwargs))
+        assert getattr(ent, prop_name) == expected_real
 
 
 # ── Humidity SSOT baseline update ────────────────────────────────────
