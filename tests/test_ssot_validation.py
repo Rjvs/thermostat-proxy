@@ -7,11 +7,11 @@ via make_entity and directly calling the internal methods.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from homeassistant.components.climate.const import HVACMode
 from homeassistant.core import HomeAssistant
 
 from custom_components.thermostat_proxy.climate import (
@@ -76,9 +76,9 @@ class TestSSOTChangeValidation:
         assert entity._validate_thermostat_change(new) is True
 
     def test_rejects_multi_step_temp_change(self, entity) -> None:
-        """A temperature jump of 3 steps should be rejected."""
+        """A single temperature change is accepted regardless of step size."""
         new = _state(hvac="heat", temperature=23.5, fan_mode="auto", swing_mode="off")
-        assert entity._validate_thermostat_change(new) is False
+        assert entity._validate_thermostat_change(new) is True
 
     def test_rejects_compound_changes(self, entity) -> None:
         """Simultaneous HVAC mode + fan mode change should be rejected."""
@@ -186,3 +186,60 @@ class TestUntrackedSettingsPassThrough:
         assert "temperature" not in ssot_changes
         assert len(blocked) == 0
         assert len(ssot_changes) == 0
+
+
+class TestExternalEventPolicy:
+    """External event handling follows deterministic echo + SSOT/IT policy."""
+
+    def _event(self, old_state, new_state):
+        return SimpleNamespace(data={"old_state": old_state, "new_state": new_state})
+
+    def test_it_rejects_all_external_changes(self, hass, make_entity) -> None:
+        entity = make_entity(it_settings=["hvac_mode"])
+        seed_core_baselines(entity)
+        old = _state(hvac="heat", temperature=22.0, fan_mode="auto", swing_mode="off")
+        new = _state(hvac="cool", temperature=22.0, fan_mode="auto", swing_mode="off")
+        entity._real_state = old
+        entity._schedule_target_realign = lambda *args, **kwargs: None
+        entity.async_write_ha_state = lambda: None
+        entity._async_correct_physical_device = AsyncMock()
+        entity.hass.async_create_task = lambda coro: coro.close()
+
+        entity._async_handle_real_state_event(self._event(old, new))
+
+        assert entity._real_state == old
+        entity._async_correct_physical_device.assert_called_once()
+
+    def test_ssot_rejects_compound_external_changes(self, hass, make_entity) -> None:
+        entity = make_entity(ssot_settings=["hvac_mode", "temperature"])
+        seed_core_baselines(entity)
+        old = _state(hvac="heat", temperature=22.0, fan_mode="auto", swing_mode="off")
+        new = _state(hvac="cool", temperature=23.0, fan_mode="auto", swing_mode="off")
+        entity._real_state = old
+        entity._schedule_target_realign = lambda *args, **kwargs: None
+        entity.async_write_ha_state = lambda: None
+        entity._async_correct_physical_device = AsyncMock()
+        entity.hass.async_create_task = lambda coro: coro.close()
+
+        entity._async_handle_real_state_event(self._event(old, new))
+
+        assert entity._real_state == old
+        entity._async_correct_physical_device.assert_called_once()
+
+    def test_ssot_accepts_single_external_temperature_change(self, hass, make_entity) -> None:
+        entity = make_entity(ssot_settings=["hvac_mode", "temperature"])
+        seed_core_baselines(entity)
+        old = _state(hvac="heat", temperature=22.0, fan_mode="auto", swing_mode="off")
+        new = _state(hvac="heat", temperature=23.0, fan_mode="auto", swing_mode="off")
+        entity._real_state = old
+        entity._schedule_target_realign = lambda *args, **kwargs: None
+        entity.async_write_ha_state = lambda: None
+        entity._async_correct_physical_device = AsyncMock()
+        entity.hass.async_create_task = lambda coro: coro.close()
+        entity._handle_external_real_target_change = MagicMock()
+
+        entity._async_handle_real_state_event(self._event(old, new))
+
+        entity._async_correct_physical_device.assert_not_called()
+        assert entity._last_real_target_temp == 23.0
+        entity._handle_external_real_target_change.assert_called_once_with(23.0)

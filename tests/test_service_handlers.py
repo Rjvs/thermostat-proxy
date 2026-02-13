@@ -280,6 +280,58 @@ class TestSetFanMode:
         assert ent._ssot_baselines.get(TrackableSetting.FAN_MODE) == "high"
 
 
+# ── async_turn_on / async_turn_off ───────────────────────────────────
+
+
+class TestTurnOnOff:
+    """turn_on/turn_off should also participate in HVAC tracking."""
+
+    async def test_turn_off_records_hvac_pending(
+        self, hass: HomeAssistant, entity
+    ) -> None:
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
+            await entity.async_turn_off()
+
+        assert entity._has_pending_setting_request(
+            TrackableSetting.HVAC_MODE, HVACMode.OFF
+        )
+
+    async def test_turn_off_updates_ssot_baseline_when_enabled(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        ent = make_entity(ssot_settings=["hvac_mode", "temperature"])
+        ent._ssot_baselines[TrackableSetting.HVAC_MODE] = HVACMode.HEAT
+
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
+            await ent.async_turn_off()
+
+        assert ent._ssot_baselines.get(TrackableSetting.HVAC_MODE) == HVACMode.OFF
+
+    async def test_turn_on_records_hvac_pending_with_last_non_off_mode(
+        self, hass: HomeAssistant, entity
+    ) -> None:
+        entity._last_non_off_hvac_mode = HVACMode.HEAT
+
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
+            await entity.async_turn_on()
+
+        assert entity._has_pending_setting_request(
+            TrackableSetting.HVAC_MODE, HVACMode.HEAT
+        )
+
+    async def test_turn_on_updates_ssot_baseline_when_enabled(
+        self, hass: HomeAssistant, make_entity
+    ) -> None:
+        ent = make_entity(ssot_settings=["hvac_mode", "temperature"])
+        ent._last_non_off_hvac_mode = HVACMode.COOL
+        ent._ssot_baselines[TrackableSetting.HVAC_MODE] = HVACMode.OFF
+
+        with patch(PATCH_ASYNC_CALL, new_callable=AsyncMock):
+            await ent.async_turn_on()
+
+        assert ent._ssot_baselines.get(TrackableSetting.HVAC_MODE) == HVACMode.COOL
+
+
 # ── async_set_preset_mode ────────────────────────────────────────────
 
 

@@ -54,7 +54,7 @@ def _build_available_settings(
     hass, thermostat_entity_id: str | None
 ) -> list[selector.SelectOptionDict]:
     """Probe device capabilities and return trackable setting options."""
-    from .climate import TrackableSetting
+    from .climate_model import TrackableSetting
 
     # Core settings (no feature_flag) are always available.
     options: list[selector.SelectOptionDict] = [
