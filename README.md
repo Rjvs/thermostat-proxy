@@ -7,7 +7,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 
 ## Installation via HACS
 
-[![Add to Home Assistant](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?repository=thermostat-proxy&category=integration&owner=jianyu-li)
+[![Add to Home Assistant](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?repository=thermostat-proxy&category=integration&owner=Rjvs)
 
 ![Thermostat Proxy screenshot](images/main.png)
 ![Comparison diagram](images/comparison.png)
