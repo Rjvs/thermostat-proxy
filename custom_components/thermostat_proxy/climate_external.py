@@ -78,7 +78,7 @@ def handle_real_state_event(entity, event) -> bool:
             change_str,
         )
         entity._real_state = previous_real_state
-        entity.hass.async_create_task(entity._async_correct_physical_device())
+        entity._track_background_task(entity._async_correct_physical_device())
         entity.async_write_ha_state()
         return False
 
