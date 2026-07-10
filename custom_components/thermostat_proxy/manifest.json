@@ -1,12 +1,12 @@
 {
   "domain": "thermostat_proxy",
   "name": "Thermostat Proxy",
-  "codeowners": ["@jianyu-li"],
+  "codeowners": ["@Rjvs"],
   "config_flow": true,
   "dependencies": ["logbook"],
-  "documentation": "https://github.com/jianyu-li/thermostat-proxy",
+  "documentation": "https://github.com/Rjvs/thermostat-proxy",
   "iot_class": "assumed_state",
-  "issue_tracker": "https://github.com/jianyu-li/thermostat-proxy/issues",
+  "issue_tracker": "https://github.com/Rjvs/thermostat-proxy/issues",
   "requirements": [],
   "version": "5.2.1"
 }
