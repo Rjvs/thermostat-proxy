@@ -153,6 +153,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._entity_health: dict[str, bool] = {}
         self._command_lock = asyncio.Lock()
         self._sensor_realign_task: asyncio.Task | None = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._suppress_sync_logs_until: float | None = None
         self._cooldown_timer_unsub: Callable[[], None] | None = None
         self._last_non_off_hvac_mode: HVACMode | None = None
@@ -252,12 +253,29 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
         )
 
+    def _track_background_task(self, coro) -> None:
+        """Schedule a fire-and-forget coroutine tied to the entity lifecycle.
+
+        Keeps a strong reference to the task (so it isn't garbage collected
+        mid-flight) and ensures it is cancelled if the entity is removed,
+        preventing stale service calls from a superseded entity after a
+        config-entry reload.
+        """
+        task = self.hass.async_create_task(coro)
+        if task is None:
+            return
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def async_will_remove_from_hass(self) -> None:
         """Clean up listeners when entity is removed."""
 
         await super().async_will_remove_from_hass()
         if self._sensor_realign_task and not self._sensor_realign_task.done():
             self._sensor_realign_task.cancel()
+        for task in list(self._background_tasks):
+            task.cancel()
+        self._background_tasks.clear()
         if self._cooldown_timer_unsub:
             self._cooldown_timer_unsub()
             self._cooldown_timer_unsub = None
@@ -315,7 +333,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._selected_sensor_name = self._physical_sensor_name
         self.async_write_ha_state()
 
-        self.hass.async_create_task(
+        self._track_background_task(
             self._async_log_physical_override(real_target, switched)
         )
 
